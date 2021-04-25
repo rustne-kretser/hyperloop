@@ -300,21 +300,62 @@ pub mod hyperloop {
     }
 }
 
-// #[cfg(test)]
-// #[macro_use]
-// extern crate std;
-// mod tests {
-//     #[test]
-//     fn test_queue() {
-//         use crate::hyperloop::*;
-//         use std::vec::Vec;
-//         use std::sync::Mutex;
+#[cfg(test)]
+#[macro_use]
+extern crate std;
+mod tests {
+    #[test]
+    fn test_priority_channel() {
+        use crate::priority_channel::*;
 
-//         let hyperloop = Hyperloop::new(10);
-//         let queue: Mutex<Vec = Mutex::new(Vec::new());
+        let (sender, mut receiver) = channel(5);
 
-//         async fn fn1() {
-//             queue.try_lock();
-//         }
-//     }
-// }
+        sender.send(2, 2).unwrap();
+        sender.send(4, 4).unwrap();
+        sender.send(1, 1).unwrap();
+        sender.send(3, 3).unwrap();
+        sender.send(5, 5).unwrap();
+
+        assert_eq!(sender.send(6, 6), Err(6));
+
+        assert_eq!(receiver.recv(), Ok(5));
+        assert_eq!(receiver.recv(), Ok(4));
+        assert_eq!(receiver.recv(), Ok(3));
+        assert_eq!(receiver.recv(), Ok(2));
+        assert_eq!(receiver.recv(), Ok(1));
+        assert_eq!(receiver.recv(), Err(RecvError {} ));
+    }
+
+    #[test]
+    fn test_executor() {
+        use crate::hyperloop::*;
+        use crossbeam_queue::ArrayQueue;
+        use {
+            alloc::{
+                sync::{Arc},
+                boxed::{Box},
+            },
+        };
+
+        let mut hyperloop = Hyperloop::new(10);
+        let queue =  Arc::new(ArrayQueue::new(10));
+
+        async fn test_future(queue: Arc<ArrayQueue<u32>>, value: u32) {
+            if let Err(_err) = queue.push(value) {
+                println!("Failed to push!");
+            }
+        }
+
+        hyperloop.add_and_schedule(Box::pin(test_future(queue.clone(), 1)), 1);
+        hyperloop.add_and_schedule(Box::pin(test_future(queue.clone(), 2)), 3);
+        hyperloop.add_and_schedule(Box::pin(test_future(queue.clone(), 3)), 2);
+        hyperloop.add_and_schedule(Box::pin(test_future(queue.clone(), 4)), 4);
+
+        hyperloop.poll_tasks();
+
+        assert_eq!(queue.pop().unwrap(), 4);
+        assert_eq!(queue.pop().unwrap(), 2);
+        assert_eq!(queue.pop().unwrap(), 3);
+        assert_eq!(queue.pop().unwrap(), 1);
+    }
+}
