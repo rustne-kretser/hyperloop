@@ -186,7 +186,7 @@ pub mod hyperloop {
     }
 
     impl<P: 'static + Ord + Sync + Send + Copy> TaskWaker<P> {
-        fn new(task_id: TaskId, priority: P, sender: TaskSender<P>) -> Waker {
+        fn get_waker(task_id: TaskId, priority: P, sender: TaskSender<P>) -> Waker {
             Waker::from(Arc::new(TaskWaker {
                 task_id,
                 priority,
@@ -226,7 +226,7 @@ pub mod hyperloop {
             Task {
                 future,
                 id,
-                waker: TaskWaker::new(id, pri, sender),
+                waker: TaskWaker::get_waker(id, pri, sender),
             }
         }
 
@@ -265,7 +265,7 @@ pub mod hyperloop {
             let task_id = task.get_id();
             self.tasks.insert(task_id, task);
 
-            return task_id;
+            task_id
         }
 
         pub fn schedule_task(&mut self, task_id: TaskId) {
@@ -285,7 +285,7 @@ pub mod hyperloop {
         pub fn poll_tasks(&mut self) {
             while let Ok(task_id) = self.receiver.recv() {
                 if let Some(task) = self.tasks.get_mut(&task_id) {
-                    let waker = Waker::from(task.waker.clone());
+                    let waker = task.waker.clone();
                     let mut cx = Context::from_waker(&waker);
 
                     match task.poll(&mut cx) {

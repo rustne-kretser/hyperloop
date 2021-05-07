@@ -29,7 +29,7 @@ pub mod mpsc {
 
         pub fn channel(self: Arc<Self>) -> (Sender<T>, Receiver<T>) {
             (Sender { channel: self.clone() },
-             Receiver { channel: self.clone() })
+             Receiver { channel: self })
         }
     }
 
@@ -129,7 +129,7 @@ pub mod pubsub {
 
         pub fn subscribe(&mut self, class: C, subscriber: &Subscriber<T>) {
             let senders = self.subscribers.entry(class)
-                .or_insert_with(|| Vec::new());
+                .or_insert_with(Vec::new);
 
             senders.push(subscriber.sender.clone());
         }
