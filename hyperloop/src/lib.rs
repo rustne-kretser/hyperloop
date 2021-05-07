@@ -5,7 +5,6 @@ extern crate alloc;
 pub mod priority_channel {
     use {
         alloc::{
-            collections::{BinaryHeap},
             sync::{Arc},
         },
         core::{
@@ -13,6 +12,7 @@ pub mod priority_channel {
             fmt,
         },
         crossbeam_queue::ArrayQueue,
+        heapless::binary_heap::{BinaryHeap,Max},
     };
 
     #[derive(Debug, Clone, Copy)]
@@ -51,19 +51,19 @@ pub mod priority_channel {
         }
     }
 
-    struct Channel<T, P>
+    struct Channel<T, P, const N: usize>
     where T: Copy,
           P: Ord + Copy {
         in_queue: Arc<ArrayQueue<Ticket<T, P>>>,
-        out_queue: BinaryHeap<Ticket<T, P>>,
+        out_queue: BinaryHeap<Ticket<T, P>, Max, N>,
     }
 
-    impl<T, P> Channel<T, P>
+    impl<T, P, const N: usize> Channel<T, P, N>
     where T: Copy,
           P: Ord + Copy {
-        fn new(capacity: usize) -> Self {
+        fn new() -> Self {
             Self {
-                in_queue: Arc::new(ArrayQueue::new(capacity)),
+                in_queue: Arc::new(ArrayQueue::new(N)),
                 out_queue: BinaryHeap::new(),
             }
         }
@@ -104,24 +104,30 @@ pub mod priority_channel {
     }
 
 
-    pub struct Receiver<T, P>
+    pub struct Receiver<T, P,const N: usize>
     where T: Copy,
           P: Ord + Copy {
-        channel: Channel<T, P>,
+        channel: Channel<T, P, N>,
     }
 
-    impl<T, P> Receiver<T, P>
+    impl<T, P, const N: usize> Receiver<T, P, N>
     where T: Copy,
           P: Ord + Copy {
-        fn new(channel: Channel<T, P>) -> Self {
+        fn new(channel: Channel<T, P, N>) -> Self {
             Self {
                 channel
             }
         }
 
         pub fn recv(&mut self) -> Result<T, RecvError> {
-            while let Some(ticket) = self.channel.in_queue.pop() {
-                self.channel.out_queue.push(ticket);
+            while self.channel.out_queue.len() < N {
+                if let Some(ticket) = self.channel.in_queue.pop() {
+                    if let Err(_) = self.channel.out_queue.push(ticket) {
+
+                    }
+                } else {
+                    break;
+                }
             }
 
             if let Some(ticket) = self.channel.out_queue.pop() {
@@ -133,10 +139,10 @@ pub mod priority_channel {
         }
     }
 
-    pub fn channel<T, P>(capacity: usize) -> (Sender<T, P>, Receiver<T, P>)
+    pub fn channel<T, P, const N: usize>() -> (Sender<T, P>, Receiver<T, P, N>)
     where T: Copy,
           P: Ord + Copy {
-        let pri_queue = Channel::new(capacity);
+        let pri_queue = Channel::new();
         (Sender::new(pri_queue.in_queue.clone()),
          Receiver::new(pri_queue))
     }
@@ -177,7 +183,7 @@ pub mod hyperloop {
     }
 
     type TaskSender<P> = Sender<TaskId, P>;
-    type TaskReceiver<P> = Receiver<TaskId, P>;
+    type TaskReceiver<P, const N: usize> = Receiver<TaskId, P, N>;
 
     struct TaskWaker<P: Ord + Copy> {
         task_id: TaskId,
@@ -243,15 +249,15 @@ pub mod hyperloop {
         }
     }
 
-    pub struct Hyperloop<P: Ord + Copy> {
+    pub struct Hyperloop<P: Ord + Copy, const N: usize> {
         tasks: BTreeMap<TaskId, Task>,
         sender: TaskSender<P>,
-        receiver: TaskReceiver<P>,
+        receiver: TaskReceiver<P, N>,
     }
 
-    impl<P: 'static + Ord + Sync + Send + Copy> Hyperloop<P> {
-        pub fn new(capacity: usize) -> Self {
-            let (sender, receiver) = channel(capacity);
+    impl<P: 'static + Ord + Sync + Send + Copy, const N: usize> Hyperloop<P, N> {
+        pub fn new() -> Self {
+            let (sender, receiver) = channel();
 
             Self {
                 tasks: BTreeMap::new(),
@@ -308,7 +314,7 @@ mod tests {
     fn test_priority_channel() {
         use crate::priority_channel::*;
 
-        let (sender, mut receiver) = channel(5);
+        let (sender, mut receiver) = channel::<_, _, 5>();
 
         sender.send(2, 2).unwrap();
         sender.send(4, 4).unwrap();
@@ -337,7 +343,7 @@ mod tests {
             },
         };
 
-        let mut hyperloop = Hyperloop::new(10);
+        let mut hyperloop = Hyperloop::<_, 10>::new();
         let queue =  Arc::new(ArrayQueue::new(10));
 
         async fn test_future(queue: Arc<ArrayQueue<u32>>, value: u32) {

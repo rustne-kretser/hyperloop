@@ -206,7 +206,7 @@ mod tests {
         };
         use alloc::boxed::Box;
 
-        let mut hp = Hyperloop::new(10);
+        let mut hp = Hyperloop::<_, 10>::new();
         let mut pubsub: PubSub<Message, Class> = PubSub::new(10);
 
         async fn baba(mut sender: Sender<Message>, mut receiver: Receiver<Message>) {
