@@ -225,6 +225,51 @@ where T: Tick,
     }
 }
 
+pub struct TimeoutFuture<S, T, F>
+where T: Tick,
+      S: TimerStateRef<Tick = T>,
+      F: Future {
+    future: F,
+    delay: DelayFuture<S, T>,
+}
+
+impl<S, T, F> TimeoutFuture<S, T, F>
+where T: Tick,
+      S: TimerStateRef<Tick = T>,
+      F: Future {
+    fn new(future: F, sender: Sender<Ticket<T>>, state: S, expires: T) -> Self {
+        Self {
+            future,
+            delay: DelayFuture::new(sender, state, expires),
+        }
+    }
+}
+
+impl<S, T, F> Future for TimeoutFuture<S, T, F>
+where T: Tick,
+      S: TimerStateRef<Tick = T>,
+      F: Future {
+    type Output = Result<F::Output, ()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let (future, delay) = unsafe {
+            let this = self.get_unchecked_mut();
+            (Pin::new_unchecked(&mut this.future),
+             Pin::new_unchecked(&mut this.delay))
+        };
+
+        if let Poll::Ready(ret) = future.poll(cx) {
+            Poll::Ready(Ok(ret))
+        } else {
+            if let Poll::Ready(()) = delay.poll(cx) {
+                Poll::Ready(Err(()))
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Timer<S, T>
 where T: Tick,
@@ -268,6 +313,14 @@ where S: TimerStateRef<Tick = T>,
         DelayFuture::new(self.sender.clone(),
                          self.state.clone(),
                          self.delay_to_ticks(duration))
+    }
+
+    pub fn timeout<F: Future>(&self, future: F, duration: Milliseconds)
+                   -> TimeoutFuture<S, T, F> {
+        TimeoutFuture::new(future,
+                           self.sender.clone(),
+                           self.state.clone(),
+                           self.delay_to_ticks(duration))
     }
 }
 
@@ -376,13 +429,13 @@ mod tests {
 
     struct SimpleLogger;
 
-    use log::{SetLoggerError, LevelFilter};
+    use log::LevelFilter;
 
     static LOGGER: SimpleLogger = SimpleLogger;
 
-    fn log_init() -> Result<(), SetLoggerError> {
-        log::set_logger(&LOGGER)
-            .map(|()| log::set_max_level(LevelFilter::Info))
+    fn log_init() {
+        let _ = log::set_logger(&LOGGER)
+            .map(|()| log::set_max_level(LevelFilter::Info));
     }
 
 
@@ -506,7 +559,7 @@ mod tests {
         let mut hyperloop = Hyperloop::<_, 10>::new();
         let queue =  Arc::new(ArrayQueue::new(10));
 
-        log_init().unwrap();
+        log_init();
 
         async fn test_future(queue: Arc<ArrayQueue<u32>>,
                              timer: Timer<AtomicTimerStateRef<u32, AtomicU32>, u32>) {
@@ -582,6 +635,61 @@ mod tests {
         hyperloop.poll_tasks();
 
         assert_eq!(queue.pop(), Some(6));
+        assert_eq!(queue.pop(), None);
+    }
+
+    #[test]
+    fn timeout() {
+        let state: &'static AtomicTimerState<u32, AtomicU32> = Box::leak(
+            Box::new(AtomicTimerState::new()));
+        let stateref = state.get_ref();
+        let scheduler: &'static mut Scheduler<_, _, 10>
+            = Box::leak(Box::new(Scheduler::new(1000.Hz(), stateref.clone())));
+        let timer = scheduler.get_timer();
+        let mut hyperloop = Hyperloop::<_, 10>::new();
+        let queue =  Arc::new(ArrayQueue::new(10));
+
+        log_init();
+
+        async fn slow_future(timer: Timer<AtomicTimerStateRef<u32, AtomicU32>, u32>) {
+            timer.delay(1000.milliseconds()).await;
+        }
+
+        async fn waiting_future(queue: Arc<ArrayQueue<u32>>,
+                                timer: Timer<AtomicTimerStateRef<u32, AtomicU32>, u32>) {
+            queue.push(1).unwrap();
+
+            assert_eq!(timer.timeout(slow_future(timer.clone()), 100.milliseconds()).await,
+                       Err(()));
+            queue.push(2).unwrap();
+
+            assert_eq!(timer.timeout(slow_future(timer.clone()), 1001.milliseconds()).await,
+                       Ok(()));
+            queue.push(3).unwrap();
+        }
+
+        hyperloop.add_and_schedule(Box::pin(scheduler.task()), 1);
+        hyperloop.add_and_schedule(Box::pin(waiting_future(queue.clone(), timer)), 1);
+
+        hyperloop.poll_tasks();
+
+        assert_eq!(queue.pop(), Some(1));
+        assert_eq!(queue.pop(), None);
+
+        state.add_count(101);
+        state.wake();
+
+        hyperloop.poll_tasks();
+
+        assert_eq!(queue.pop(), Some(2));
+        assert_eq!(queue.pop(), None);
+
+        state.add_count(1001);
+        state.wake();
+
+        hyperloop.poll_tasks();
+
+        assert_eq!(queue.pop(), Some(3));
         assert_eq!(queue.pop(), None);
     }
 }
