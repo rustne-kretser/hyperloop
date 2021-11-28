@@ -1,11 +1,7 @@
 use core::{fmt, marker::PhantomData, ops::Add, pin::Pin, sync::atomic::Ordering, task::{Context, Poll, Waker}};
 
 use atomic_traits::{Atomic, NumOps};
-use embedded_time::{
-    duration::Milliseconds,
-    fixed_point::FixedPoint,
-    rate::{Hertz, Rate},
-};
+use embedded_time::{duration::{Duration, Milliseconds}, fixed_point::FixedPoint, rate::{Hertz, Rate}};
 
 use core::future::Future;
 use futures::{Stream, StreamExt, task::AtomicWaker};
@@ -14,7 +10,7 @@ use log::{error, info};
 
 use crate::priority_channel::{Item, Receiver, Sender, channel};
 
-pub trait Tick: 'static + Add<Output = Self> + Sized + From<u32> + Sync + Send + Copy + Ord + fmt::Display {}
+pub trait Tick: 'static + Add<Output = Self> + Sized + From<u32> + Sync + Send + Copy + Ord + fmt::Display + Unpin {}
 
 impl Tick for u32 {}
 
@@ -216,7 +212,11 @@ where T: Tick,
             self.started = true;
             Poll::Pending
         } else {
-            if self.state.get_count() >= self.expires {
+            // Delay until tick count is greater than the
+            // expiration. This ensures that we wait for no less than
+            // the specified duration, and possibly one tick longer
+            // than desired.
+            if self.state.get_count() > self.expires {
                 Poll::Ready(())
             } else {
                 Poll::Pending
@@ -298,7 +298,7 @@ where S: TimerStateRef<Tick = T>,
         self.state.get_count()
     }
 
-    fn delay_to_ticks<D: Into<Milliseconds>>(&self, duration: D) -> T {
+    fn delay_to_ticks<D: Duration + Into<Milliseconds>>(&self, duration: D) -> T {
         let ms: Milliseconds = duration.into();
         let rate = self.get_rate().to_duration::<Milliseconds>().unwrap();
 
@@ -328,7 +328,7 @@ struct TimerFuture<T, S>
 where T: Tick,
       S: TimerStateRef<Tick = T> {
     state: S,
-    waiting: bool,
+    expires: Option<T>,
 }
 
 impl<T, S> TimerFuture<T, S>
@@ -337,7 +337,7 @@ where T: Tick,
     fn new(state: S) -> Self {
         Self {
             state,
-            waiting: false,
+            expires: None,
         }
     }
 }
@@ -348,14 +348,17 @@ where T: Tick,
     type Item = ();
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.waiting {
-            self.waiting = false;
-            Poll::Ready(Some(()))
+        if let Some(expires) = self.expires {
+            if self.state.get_count() >= expires {
+                self.expires = None;
+                return Poll::Ready(Some(()))
+            }
         } else {
-            self.waiting = true;
-            self.state.register_waker(cx.waker());
-            Poll::Pending
+            self.expires = Some(self.state.get_count() + 1.into());
         }
+
+        self.state.register_waker(cx.waker());
+        Poll::Pending
     }
 }
 
@@ -388,9 +391,7 @@ where T: Tick,
 
     fn next_waker(&mut self) -> Option<Waker> {
         if let Ok(ticket) = self.receiver.peek_mut() {
-            info!("Ticket expires: {}, tick count: {}",
-                  ticket.expires, self.state.get_count());
-            if self.state.get_count() >= ticket.expires {
+            if self.state.get_count() > ticket.expires {
                 return Some(PeekMut::pop(ticket).waker);
             }
         }
@@ -520,7 +521,7 @@ mod tests {
         assert_eq!(Pin::new(&mut future).poll(&mut cx), Poll::Pending);
         assert_eq!(future.started, true);
 
-        state.set_count(10);
+        state.set_count(11);
 
         assert_eq!(Pin::new(&mut future).poll(&mut cx), Poll::Ready(()));
 
@@ -594,7 +595,7 @@ mod tests {
         assert_eq!(queue.pop(), Some(1));
         assert_eq!(queue.pop(), None);
 
-        state.wake();
+        state.tick();
         hyperloop.poll_tasks();
 
         assert_eq!(queue.pop(), Some(2));
@@ -605,6 +606,7 @@ mod tests {
 
         assert_eq!(queue.pop(), None);
 
+        state.tick();
         state.tick();
         hyperloop.poll_tasks();
 
@@ -619,12 +621,13 @@ mod tests {
         assert_eq!(queue.pop(), None);
 
         state.tick();
+        state.tick();
         hyperloop.poll_tasks();
 
         assert_eq!(queue.pop(), Some(5));
         assert_eq!(queue.pop(), None);
 
-        for _ in 0..9 {
+        for _ in 0..10 {
             state.tick();
             hyperloop.poll_tasks();
 
@@ -684,7 +687,16 @@ mod tests {
         assert_eq!(queue.pop(), Some(2));
         assert_eq!(queue.pop(), None);
 
-        state.add_count(1001);
+        for _ in 0..1000 {
+            state.increment_count();
+            state.wake();
+
+            hyperloop.poll_tasks();
+
+            assert_eq!(queue.pop(), None);
+        }
+
+        state.increment_count();
         state.wake();
 
         hyperloop.poll_tasks();
