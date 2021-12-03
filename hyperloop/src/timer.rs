@@ -414,13 +414,14 @@ where T: Tick,
 
 #[cfg(test)]
 mod tests {
-    use core::sync::atomic::{AtomicBool, AtomicU32};
+    use core::sync::atomic::AtomicU32;
 
     use crate::hyperloop::Hyperloop;
+    use crate::common::tests::MockWaker;
 
     use super::*;
 
-    use alloc::{boxed::Box, sync::Arc, task::Wake};
+    use alloc::{boxed::Box, sync::Arc};
     use crossbeam_queue::ArrayQueue;
     use embedded_time::rate::Extensions;
     use embedded_time::duration::Extensions as Ext;
@@ -452,23 +453,6 @@ mod tests {
         }
 
         fn flush(&self) {}
-    }
-
-
-    struct MockWaker {
-        woke: AtomicBool,
-    }
-
-    impl MockWaker {
-        fn new() -> Self {
-            Self { woke: AtomicBool::new(false) }
-        }
-    }
-
-    impl Wake for MockWaker {
-        fn wake(self: Arc<Self>) {
-            self.woke.store(true, Ordering::Relaxed);
-        }
     }
 
     #[test]

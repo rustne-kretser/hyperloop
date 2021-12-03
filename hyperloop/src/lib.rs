@@ -5,6 +5,8 @@ extern crate alloc;
 mod priority_channel;
 pub mod timer;
 pub mod notify;
+pub mod interrupt;
+pub mod common;
 
 pub mod hyperloop {
     use core::{cmp::Ordering, sync::atomic::AtomicU8};
