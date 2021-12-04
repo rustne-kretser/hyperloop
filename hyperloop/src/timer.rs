@@ -416,7 +416,7 @@ where T: Tick,
 mod tests {
     use core::sync::atomic::AtomicU32;
 
-    use crate::hyperloop::Hyperloop;
+    use crate::executor::Executor;
     use crate::common::tests::MockWaker;
 
     use super::*;
@@ -541,7 +541,7 @@ mod tests {
         let scheduler: &'static mut Scheduler<_, _, 10>
             = Box::leak(Box::new(Scheduler::new(1000.Hz(), stateref.clone())));
         let timer = scheduler.get_timer();
-        let mut hyperloop = Hyperloop::<_, 10>::new();
+        let mut hyperloop = Executor::<_, 10>::new();
         let queue =  Arc::new(ArrayQueue::new(10));
 
         log_init();
@@ -633,7 +633,7 @@ mod tests {
         let scheduler: &'static mut Scheduler<_, _, 10>
             = Box::leak(Box::new(Scheduler::new(1000.Hz(), stateref.clone())));
         let timer = scheduler.get_timer();
-        let mut hyperloop = Hyperloop::<_, 10>::new();
+        let mut hyperloop = Executor::<_, 10>::new();
         let queue =  Arc::new(ArrayQueue::new(10));
 
         log_init();

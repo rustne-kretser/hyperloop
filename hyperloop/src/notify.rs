@@ -92,7 +92,7 @@ mod tests {
     use alloc::boxed::Box;
     use crossbeam_queue::ArrayQueue;
 
-    use crate::hyperloop::Hyperloop;
+    use crate::executor::Executor;
 
     use super::*;
 
@@ -100,7 +100,7 @@ mod tests {
     fn notify() {
         let (sender, receiver) = notification();
 
-        let mut hyperloop = Hyperloop::<_, 10>::new();
+        let mut hyperloop = Executor::<_, 10>::new();
         let queue =  Arc::new(ArrayQueue::new(10));
 
         async fn wait(receiver: Receiver, queue: Arc<ArrayQueue<u32>>) {
