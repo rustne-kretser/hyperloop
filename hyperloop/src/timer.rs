@@ -6,7 +6,7 @@ use embedded_time::{duration::{Duration, Milliseconds}, fixed_point::FixedPoint,
 use core::future::Future;
 use futures::{Stream, StreamExt, task::AtomicWaker};
 use heapless::binary_heap::{Min, PeekMut};
-use log::{error, info};
+use log::error;
 
 use crate::priority_channel::{Item, Receiver, Sender, channel};
 
@@ -541,7 +541,7 @@ mod tests {
         let scheduler: &'static mut Scheduler<_, _, 10>
             = Box::leak(Box::new(Scheduler::new(1000.Hz(), stateref.clone())));
         let timer = scheduler.get_timer();
-        let mut hyperloop = Executor::<_, 10>::new();
+        let mut executor = Box::new(Executor::<10>::new());
         let queue =  Arc::new(ArrayQueue::new(10));
 
         log_init();
@@ -571,55 +571,55 @@ mod tests {
             queue.push(6).unwrap();
         }
 
-        hyperloop.add_and_schedule(Box::pin(scheduler.task()), 1);
-        hyperloop.add_and_schedule(Box::pin(test_future(queue.clone(), timer.clone())), 1);
+        executor.add_task(Box::pin(scheduler.task()), 1).unwrap();
+        executor.add_task(Box::pin(test_future(queue.clone(), timer.clone())), 1).unwrap();
 
-        hyperloop.poll_tasks();
+        unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), Some(1));
         assert_eq!(queue.pop(), None);
 
         state.tick();
-        hyperloop.poll_tasks();
+        unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), Some(2));
         assert_eq!(queue.pop(), None);
 
         state.wake();
-        hyperloop.poll_tasks();
+        unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), None);
 
         state.tick();
         state.tick();
-        hyperloop.poll_tasks();
+        unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), Some(3));
         assert_eq!(queue.pop(), None);
 
         state.tick();
         state.tick();
-        hyperloop.poll_tasks();
+        unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), Some(4));
         assert_eq!(queue.pop(), None);
 
         state.tick();
         state.tick();
-        hyperloop.poll_tasks();
+        unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), Some(5));
         assert_eq!(queue.pop(), None);
 
         for _ in 0..10 {
             state.tick();
-            hyperloop.poll_tasks();
+            unsafe { executor.poll_tasks(); }
 
             assert_eq!(queue.pop(), None);
         }
 
         state.tick();
-        hyperloop.poll_tasks();
+        unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), Some(6));
         assert_eq!(queue.pop(), None);
@@ -633,7 +633,7 @@ mod tests {
         let scheduler: &'static mut Scheduler<_, _, 10>
             = Box::leak(Box::new(Scheduler::new(1000.Hz(), stateref.clone())));
         let timer = scheduler.get_timer();
-        let mut hyperloop = Executor::<_, 10>::new();
+        let mut executor = Executor::<10>::new();
         let queue =  Arc::new(ArrayQueue::new(10));
 
         log_init();
@@ -655,10 +655,10 @@ mod tests {
             queue.push(3).unwrap();
         }
 
-        hyperloop.add_and_schedule(Box::pin(scheduler.task()), 1);
-        hyperloop.add_and_schedule(Box::pin(waiting_future(queue.clone(), timer)), 1);
+        executor.add_task(Box::pin(scheduler.task()), 1).unwrap();
+        executor.add_task(Box::pin(waiting_future(queue.clone(), timer)), 1).unwrap();
 
-        hyperloop.poll_tasks();
+        unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), Some(1));
         assert_eq!(queue.pop(), None);
@@ -666,7 +666,7 @@ mod tests {
         state.add_count(101);
         state.wake();
 
-        hyperloop.poll_tasks();
+        unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), Some(2));
         assert_eq!(queue.pop(), None);
@@ -675,7 +675,7 @@ mod tests {
             state.increment_count();
             state.wake();
 
-            hyperloop.poll_tasks();
+            unsafe { executor.poll_tasks(); }
 
             assert_eq!(queue.pop(), None);
         }
@@ -683,7 +683,7 @@ mod tests {
         state.increment_count();
         state.wake();
 
-        hyperloop.poll_tasks();
+        unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), Some(3));
         assert_eq!(queue.pop(), None);

@@ -100,7 +100,7 @@ mod tests {
     fn notify() {
         let (sender, receiver) = notification();
 
-        let mut hyperloop = Executor::<_, 10>::new();
+        let mut executor = Executor::<10>::new();
         let queue =  Arc::new(ArrayQueue::new(10));
 
         async fn wait(receiver: Receiver, queue: Arc<ArrayQueue<u32>>) {
@@ -111,32 +111,32 @@ mod tests {
             queue.push(3).unwrap();
         }
 
-        hyperloop.add_and_schedule(Box::pin(wait(receiver, queue.clone())), 1);
+        executor.add_task(Box::pin(wait(receiver, queue.clone())), 1).unwrap();
 
-        hyperloop.poll_tasks();
+        unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), Some(1));
         assert_eq!(queue.pop(), None);
 
-        hyperloop.poll_tasks();
+        unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), None);
 
         sender.notify();
 
-        hyperloop.poll_tasks();
+        unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), Some(2));
         assert_eq!(queue.pop(), None);
 
-        hyperloop.poll_tasks();
+        unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), None);
 
 
         sender.notify();
 
-        hyperloop.poll_tasks();
+        unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), Some(3));
         assert_eq!(queue.pop(), None);

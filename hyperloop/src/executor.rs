@@ -1,21 +1,16 @@
-use core::{cmp::Ordering, sync::atomic::AtomicU8};
+use core::cmp::Ordering;
 
-use heapless::binary_heap::Max;
+use heapless::{Vec, binary_heap::Max};
 
 use crate::priority_channel::Item;
+use crate::waker::get_waker;
 
 use {
-    alloc::{
-        collections::BTreeMap,
-        task::Wake,
-        sync::Arc,
-        boxed::Box,
-    },
+    alloc::boxed::Box,
     core::{
         task::{Context, Waker, Poll},
         future::Future,
         pin::Pin,
-        sync::atomic::Ordering as AtomicOrdering,
     },
     log::error,
     crate::priority_channel::{
@@ -25,92 +20,86 @@ use {
     },
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TaskId(u8);
-
-impl TaskId {
-    fn new() -> Self {
-        static NEXT_ID: AtomicU8 = AtomicU8::new(0);
-        TaskId(NEXT_ID.fetch_add(1, AtomicOrdering::Relaxed))
-    }
-}
-
-pub trait Priority: 'static + Ord + Sync + Send + Copy {}
-
-impl Priority for u8 {}
+type Priority = u8;
 
 #[derive(Debug, Clone, Copy)]
-struct Ticket<P>
-where P: Priority {
-    task: TaskId,
-    priority: P,
+struct Ticket {
+    task: *const Task,
+    priority: Priority,
 }
 
-impl<P> Item for Ticket<P>
-where P: Priority {}
+impl Item for Ticket {}
 
-impl<P> Ticket<P>
-where P: Priority {
-    fn new(task: TaskId, priority: P) -> Self {
+impl Ticket {
+    fn new(task: *const Task, priority: Priority) -> Self {
         Self {
             task,
             priority,
         }
     }
+
+    unsafe fn get_task(&self) -> &mut Task {
+        &mut *(self.task as *mut Task)
+    }
 }
 
-impl<P> PartialEq for Ticket<P>
-where P: Priority {
+impl PartialEq for Ticket {
     fn eq(&self, other: &Self) -> bool {
         self.priority == other.priority
     }
 }
 
-impl<P> Eq for Ticket<P>
-where P: Priority {}
+impl Eq for Ticket {}
 
-impl<P> PartialOrd for Ticket<P>
-where P: Priority {
+impl PartialOrd for Ticket {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<P> Ord for Ticket<P>
-where P: Priority {
+impl Ord for Ticket {
     fn cmp(&self, other: &Self) -> Ordering {
         self.priority.cmp(&other.priority)
     }
 }
 
-type TaskSender<P> = Sender<Ticket<P>>;
-type TaskReceiver<P, const N: usize> = Receiver<Ticket<P>, Max, N>;
+type TaskSender = Sender<Ticket>;
+type TaskReceiver<const N: usize> = Receiver<Ticket, Max, N>;
 
-#[derive(Clone)]
-struct TaskHandle<P>
-where P: Priority {
-    task_id: TaskId,
-    priority: P,
-    sender: TaskSender<P>,
+pub struct Task {
+    future: Pin<Box<dyn Future<Output = ()> + Sync>>,
+    priority: Priority,
+    sender: TaskSender,
 }
 
-impl<P> TaskHandle<P>
-where P: Priority {
-    fn new(task_id: TaskId, priority: P,
-           sender: TaskSender<P>) -> Self {
+impl Task {
+    fn new(
+        future: Pin<Box<dyn Future<Output = ()> + Sync>>,
+        priority: Priority,
+        sender: TaskSender,
+    ) -> Self {
         Self {
-            task_id,
+            future,
             priority,
             sender,
         }
     }
 
-    fn get_waker(self: Arc<Self>) -> Waker {
-        Waker::from(self)
+    fn poll(&mut self, context: &mut Context) -> Poll<()> {
+        self.future.as_mut().poll(context)
+    }
+
+    pub fn get_waker(self: &Self) -> Waker {
+        get_waker(self)
+    }
+
+    pub fn wake(&self) {
+        self.schedule();
     }
 
     fn schedule(&self) {
-        let ticket = Ticket::new(self.task_id, self.priority);
+        let ticket = Ticket::new(self as *const Self,
+                                 self.priority);
 
         if let Err(_err) = self.sender.send(ticket) {
             error!("Failed to push to queue");
@@ -118,108 +107,68 @@ where P: Priority {
     }
 }
 
-impl<P> Wake for TaskHandle<P>
-where P: Priority {
-    fn wake(self: Arc<Self>) {
-        self.schedule();
-    }
+trait PushRef {
+    type Item;
 
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.schedule();
+    fn push_ref(&mut self, item: Self::Item) -> Result<&Self::Item, Self::Item>;
+}
+
+impl<T, const N: usize> PushRef for Vec<T, N> {
+    type Item = T;
+
+    fn push_ref(&mut self, item: Self::Item) -> Result<&Self::Item, Self::Item> {
+        self.push(item)?;
+
+        Ok(self.last().unwrap())
     }
 }
 
-pub struct Task<P>
-where P: Priority {
-    future: Pin<Box<dyn Future<Output = ()> + Sync>>,
-    id: TaskId,
-    handle: Arc<TaskHandle<P>>,
+pub struct Executor<const N: usize> {
+    tasks: Vec<Task, N>,
+    sender: TaskSender,
+    receiver: TaskReceiver<N>,
 }
 
-impl<P> Task<P>
-where P: Priority {
-    fn new(
-        future: Pin<Box<dyn Future<Output = ()> + Sync>>,
-        pri: P,
-        sender: TaskSender<P>,
-    ) -> Self {
-        let id = TaskId::new();
-
-        Self {
-            future,
-            id,
-            handle: Arc::new(TaskHandle::new(id, pri, sender)),
-        }
-    }
-
-    fn schedule(&self) {
-        self.handle.schedule();
-    }
-
-    fn poll(&mut self, context: &mut Context) -> Poll<()> {
-        self.future.as_mut().poll(context)
-    }
-
-    fn get_id(&self) -> TaskId {
-        self.id
-    }
-}
-
-pub struct Executor<P, const N: usize>
-where P: Priority {
-    tasks: BTreeMap<TaskId, Task<P>>,
-    sender: TaskSender<P>,
-    receiver: TaskReceiver<P, N>,
-}
-
-impl<P, const N: usize> Executor<P, N>
-where P: Priority {
+impl<const N: usize> Executor<N> {
     pub fn new() -> Self {
         let (sender, receiver) = channel();
 
         Self {
-            tasks: BTreeMap::new(),
+            tasks: Vec::new(),
             sender,
             receiver,
         }
     }
 
     pub fn add_task(&mut self, future: Pin<Box<dyn Future<Output = ()> + Sync>>,
-                    pri: P) -> TaskId {
-        let task = Task::new(future, pri, self.sender.clone());
-        let task_id = task.get_id();
-        self.tasks.insert(task_id, task);
+                    priority: Priority) -> Result<(), ()> {
+        let task = Task::new(future, priority, self.sender.clone());
 
-        task_id
-    }
-
-    pub fn schedule_task(&mut self, task_id: TaskId) {
-        if let Some(task) = self.tasks.get(&task_id) {
+        if let Ok(task) = self.tasks.push_ref(task) {
             task.schedule();
+            Ok(())
+        } else {
+            Err(())
         }
     }
 
-    pub fn add_and_schedule(&mut self,
-                            future: Pin<Box<dyn Future<Output = ()> + Sync>>,
-                            pri: P) -> TaskId {
-        let id = self.add_task(future, pri);
-        self.schedule_task(id);
-        id
-    }
-
-    pub fn poll_tasks(&mut self) {
+    /// Poll all tasks in the queue
+    ///
+    /// # Safety
+    ///
+    /// This function is unsafe. The caller must guarantee that the
+    /// executor is never dropped or moved. The wakers contain raw
+    /// pointers to the tasks stored in the executor. The pointers can
+    /// be dereferenced at any time and will be dangling if the
+    /// exeutor is moved or dropped.
+    pub unsafe fn poll_tasks(&mut self) {
         while let Ok(ticket) = self.receiver.recv() {
-            if let Some(task) = self.tasks.get_mut(&ticket.task) {
-                let waker = task.handle.clone().get_waker();
-                let mut cx = Context::from_waker(&waker);
+            let task = ticket.get_task();
 
-                match task.poll(&mut cx) {
-                    Poll::Ready(()) => {
-                        self.tasks.remove(&ticket.task);
-                    },
-                    Poll::Pending => {},
-                }
-            }
+            let waker = task.get_waker();
+            let mut cx = Context::from_waker(&waker);
+
+            let _ = task.poll(&mut cx);
         }
     }
 }
@@ -235,19 +184,19 @@ mod tests {
                 boxed::Box,
         };
 
-        let mut hyperloop = Executor::<_, 10>::new();
+        let mut executor = Executor::<10>::new();
         let queue =  Arc::new(ArrayQueue::new(10));
 
         async fn test_future(queue: Arc<ArrayQueue<u32>>, value: u32) {
             queue.push(value).unwrap();
         }
 
-        hyperloop.add_and_schedule(Box::pin(test_future(queue.clone(), 1)), 1);
-        hyperloop.add_and_schedule(Box::pin(test_future(queue.clone(), 2)), 3);
-        hyperloop.add_and_schedule(Box::pin(test_future(queue.clone(), 3)), 2);
-        hyperloop.add_and_schedule(Box::pin(test_future(queue.clone(), 4)), 4);
+        executor.add_task(Box::pin(test_future(queue.clone(), 1)), 1).unwrap();
+        executor.add_task(Box::pin(test_future(queue.clone(), 2)), 3).unwrap();
+        executor.add_task(Box::pin(test_future(queue.clone(), 3)), 2).unwrap();
+        executor.add_task(Box::pin(test_future(queue.clone(), 4)), 4).unwrap();
 
-        hyperloop.poll_tasks();
+        unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop().unwrap(), 4);
         assert_eq!(queue.pop().unwrap(), 2);
