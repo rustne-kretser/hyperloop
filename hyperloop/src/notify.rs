@@ -89,10 +89,9 @@ pub fn notification() -> (Sender, Receiver) {
 
 #[cfg(test)]
 mod tests {
-    use alloc::boxed::Box;
     use crossbeam_queue::ArrayQueue;
 
-    use crate::executor::Executor;
+    use crate::{executor::Executor, task::Task};
 
     use super::*;
 
@@ -103,15 +102,22 @@ mod tests {
         let mut executor = Executor::<10>::new();
         let queue =  Arc::new(ArrayQueue::new(10));
 
-        async fn wait(receiver: Receiver, queue: Arc<ArrayQueue<u32>>) {
-            queue.push(1).unwrap();
-            receiver.wait().await;
-            queue.push(2).unwrap();
-            receiver.wait().await;
-            queue.push(3).unwrap();
-        }
+        let wait = |receiver, queue| {
+            move || {
+                async fn future(receiver: Receiver, queue: Arc<ArrayQueue<u32>>) {
+                    queue.push(1).unwrap();
+                    receiver.wait().await;
+                    queue.push(2).unwrap();
+                    receiver.wait().await;
+                    queue.push(3).unwrap();
+                }
+                future(receiver, queue)
+            }
+        };
 
-        executor.add_task(Box::pin(wait(receiver, queue.clone())), 1).unwrap();
+        let task1 = Task::new(wait(receiver, queue.clone()), 1);
+
+        task1.add_to_executor(executor.get_sender()).unwrap();
 
         unsafe { executor.poll_tasks(); }
 

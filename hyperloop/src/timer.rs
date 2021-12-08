@@ -418,6 +418,7 @@ mod tests {
 
     use crate::executor::Executor;
     use crate::common::tests::MockWaker;
+    use crate::task::Task;
 
     use super::*;
 
@@ -546,33 +547,42 @@ mod tests {
 
         log_init();
 
-        async fn test_future(queue: Arc<ArrayQueue<u32>>,
-                             timer: Timer<AtomicTimerStateRef<u32, AtomicU32>, u32>) {
-            queue.push(1).unwrap();
+        let test_future = |queue, timer| {
+            move || {
+                async fn future(queue: Arc<ArrayQueue<u32>>,
+                                timer: Timer<AtomicTimerStateRef<u32, AtomicU32>, u32>) {
+                    queue.push(1).unwrap();
 
-            timer.delay(0.milliseconds()).await;
+                    timer.delay(0.milliseconds()).await;
 
-            queue.push(2).unwrap();
+                    queue.push(2).unwrap();
 
-            timer.delay(1.milliseconds()).await;
+                    timer.delay(1.milliseconds()).await;
 
-            queue.push(3).unwrap();
+                    queue.push(3).unwrap();
 
-            timer.delay(1.milliseconds()).await;
+                    timer.delay(1.milliseconds()).await;
 
-            queue.push(4).unwrap();
+                    queue.push(4).unwrap();
 
-            timer.delay(1.milliseconds()).await;
+                    timer.delay(1.milliseconds()).await;
 
-            queue.push(5).unwrap();
+                    queue.push(5).unwrap();
 
-            timer.delay(10.milliseconds()).await;
+                    timer.delay(10.milliseconds()).await;
 
-            queue.push(6).unwrap();
-        }
+                    queue.push(6).unwrap();
+                }
 
-        executor.add_task(Box::pin(scheduler.task()), 1).unwrap();
-        executor.add_task(Box::pin(test_future(queue.clone(), timer.clone())), 1).unwrap();
+                future(queue, timer)
+            }
+        };
+
+        let task1 = Task::new(move || scheduler.task(), 1);
+        let task2 = Task::new(test_future(queue.clone(), timer.clone()), 1);
+
+        task1.add_to_executor(executor.get_sender()).unwrap();
+        task2.add_to_executor(executor.get_sender()).unwrap();
 
         unsafe { executor.poll_tasks(); }
 
@@ -638,25 +648,33 @@ mod tests {
 
         log_init();
 
-        async fn slow_future(timer: Timer<AtomicTimerStateRef<u32, AtomicU32>, u32>) {
-            timer.delay(1000.milliseconds()).await;
-        }
+        let waiting_future = |queue, timer| {
+            move || {
+                async fn slow_future(timer: Timer<AtomicTimerStateRef<u32, AtomicU32>, u32>) {
+                    timer.delay(1000.milliseconds()).await;
+                }
 
-        async fn waiting_future(queue: Arc<ArrayQueue<u32>>,
+                async fn future(queue: Arc<ArrayQueue<u32>>,
                                 timer: Timer<AtomicTimerStateRef<u32, AtomicU32>, u32>) {
-            queue.push(1).unwrap();
+                    queue.push(1).unwrap();
 
-            assert_eq!(timer.timeout(slow_future(timer.clone()), 100.milliseconds()).await,
-                       Err(()));
-            queue.push(2).unwrap();
+                    assert_eq!(timer.timeout(slow_future(timer.clone()), 100.milliseconds()).await,
+                               Err(()));
+                    queue.push(2).unwrap();
 
-            assert_eq!(timer.timeout(slow_future(timer.clone()), 1001.milliseconds()).await,
-                       Ok(()));
-            queue.push(3).unwrap();
-        }
+                    assert_eq!(timer.timeout(slow_future(timer.clone()), 1001.milliseconds()).await,
+                               Ok(()));
+                    queue.push(3).unwrap();
+                }
+                future(queue, timer)
+            }
+        };
 
-        executor.add_task(Box::pin(scheduler.task()), 1).unwrap();
-        executor.add_task(Box::pin(waiting_future(queue.clone(), timer)), 1).unwrap();
+        let task1 = Task::new(move || scheduler.task(), 1);
+        let task2 = Task::new(waiting_future(queue.clone(), timer), 1);
+
+        task1.add_to_executor(executor.get_sender()).unwrap();
+        task2.add_to_executor(executor.get_sender()).unwrap();
 
         unsafe { executor.poll_tasks(); }
 
