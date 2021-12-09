@@ -1,6 +1,5 @@
-use core::{fmt, marker::PhantomData, ops::Add, pin::Pin, sync::atomic::Ordering, task::{Context, Poll, Waker}};
+use core::{pin::Pin, task::{Context, Poll, Waker}};
 
-use atomic_traits::{Atomic, NumOps};
 use embedded_time::{duration::{Duration, Milliseconds}, fixed_point::FixedPoint, rate::{Hertz, Rate}};
 
 use core::future::Future;
@@ -10,135 +9,72 @@ use log::error;
 
 use crate::priority_channel::{Item, Receiver, Sender, channel};
 
-pub trait Tick: 'static + Add<Output = Self> + Sized + From<u32> + Sync + Send + Copy + Ord + fmt::Display + Unpin {}
+type Tick = u64;
 
-impl Tick for u32 {}
+pub struct TickCounter {
+    count: Tick,
+    waker: AtomicWaker,
+}
 
-impl Tick for u64 {}
+impl TickCounter {
+    pub const fn new() -> Self {
+        Self {
+            count: 0,
+            waker: AtomicWaker::new(),
+        }
+    }
 
-pub trait TimerState {
-    type Tick;
+    /// Increment tick count
+    ///
+    /// # Safety
+    ///
+    /// Updating the tick value is not atomic on 32-bit systems, so it
+    /// would be possible to get an invalid reading if reading during
+    /// a write. For this reason, this function should only be called
+    /// from a high priority interrupt handler.
+    pub unsafe fn increment(&mut self) {
+        self.count += 1;
+    }
 
-    fn set_count(&self, value: Self::Tick);
+    pub fn wake(&self) {
+        self.waker.wake();
+    }
 
-    fn add_count(&self, value: Self::Tick);
-
-    fn increment_count(&self);
-
-    fn wake(&self);
-
-    fn tick(&self) {
-        self.increment_count();
+    pub unsafe fn tick(&mut self) {
+        self.increment();
         self.wake();
     }
-}
 
-pub trait TimerStateRef: Clone + Unpin {
-    type Tick;
-
-    fn get_count(&self) -> Self::Tick;
-
-    fn register_waker(&self, waker: &Waker);
-}
-
-pub struct AtomicTimerState<T, A>
-where T: Tick,
-      A: Atomic<Type = T> + NumOps {
-    atomic_waker: AtomicWaker,
-    counter: A,
-    phantom: PhantomData<T>,
-}
-
-impl<T, A> AtomicTimerState<T, A>
-where T: Tick ,
-      A: Atomic<Type = T> + NumOps {
-    pub fn new() -> Self {
-        Self {
-            atomic_waker: AtomicWaker::new(),
-            counter: A::new(0_u32.into()),
-            phantom: PhantomData,
-        }
-    }
-
-    pub fn get_ref(&'static self) -> AtomicTimerStateRef<T, A> {
-        AtomicTimerStateRef::new(&self)
-    }
-}
-
-impl<T, A> TimerState for AtomicTimerState<T, A>
-where T: Tick,
-      A: 'static + Atomic<Type = T> + NumOps {
-    type Tick = T;
-
-    fn set_count(&self, value: Self::Tick) {
-        self.counter.store(value, Ordering::Relaxed);
-    }
-
-    fn add_count(&self, value: Self::Tick) {
-        self.counter.fetch_add(value, Ordering::Relaxed);
-    }
-
-    fn increment_count(&self) {
-        self.add_count(1_u32.into());
-    }
-
-    fn wake(&self) {
-        self.atomic_waker.wake();
-    }
-}
-
-pub struct AtomicTimerStateRef<T, A>
-where T: Tick,
-      A: 'static + Atomic<Type = T> + NumOps {
-    state: &'static AtomicTimerState<T, A>,
-}
-
-impl<T, A> AtomicTimerStateRef<T, A>
-where T: Tick,
-      A: 'static + Atomic<Type = T> + NumOps {
-    fn new(state: &'static AtomicTimerState<T, A>) -> Self {
-        Self {
-            state,
+    pub fn get_token(&self) -> TickCounterToken {
+        TickCounterToken {
+            counter: unsafe { &*(self as *const Self) },
         }
     }
 }
 
-impl<T, A> Unpin for AtomicTimerStateRef<T, A>
-where T: Tick,
-      A: 'static + Atomic<Type = T> + NumOps {}
-
-impl<T, A> Clone for AtomicTimerStateRef<T, A>
-where T: Tick,
-      A: 'static + Atomic<Type = T> + NumOps {
-    fn clone(&self) -> Self {
-        Self { state: self.state.clone() }
-    }
+#[derive(Clone)]
+pub struct TickCounterToken {
+    counter: &'static TickCounter,
 }
 
-impl<T, A> TimerStateRef for AtomicTimerStateRef<T, A>
-where T: Tick,
-      A: Atomic<Type = T> + NumOps {
-    type Tick = T;
-
-    fn get_count(&self) -> Self::Tick {
-        self.state.counter.load(Ordering::Relaxed)
+impl TickCounterToken {
+    pub fn register_waker(&self, waker: &Waker) {
+        self.counter.waker.register(waker);
     }
 
-    fn register_waker(&self, waker: &Waker) {
-        self.state.atomic_waker.register(waker);
+    pub fn get_count(&self) -> Tick {
+        self.counter.count
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct Ticket<T>
-where T: Tick {
-    expires: T,
+pub struct Ticket {
+    expires: Tick,
     waker: Waker,
 }
 
-impl<T> Ticket<T>
-where T: Tick {
-    fn new(expires: T, waker: Waker) -> Self {
+impl Ticket {
+    fn new(expires: Tick, waker: Waker) -> Self {
         Self {
             expires,
             waker,
@@ -146,62 +82,47 @@ where T: Tick {
     }
 }
 
-impl<T> Item for Ticket<T>
-where T: Tick {}
+impl Item for Ticket {}
 
-impl<T> PartialEq for Ticket<T>
-where T: Tick {
+impl PartialEq for Ticket {
     fn eq(&self, other: &Self) -> bool {
         self.expires == other.expires
     }
 }
 
-impl<T> Eq for Ticket<T>
-where T: Tick {}
+impl Eq for Ticket {}
 
-impl<T> PartialOrd for Ticket<T>
-where T: Tick {
+impl PartialOrd for Ticket {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<T> Ord for Ticket<T>
-where T: Tick {
+impl Ord for Ticket {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.expires.cmp(&other.expires)
     }
 }
 
-struct DelayFuture<S, T>
-where T: Tick,
-      S: TimerStateRef<Tick = T> {
-    sender: Sender<Ticket<T>>,
-    state: S,
-    expires: T,
+struct DelayFuture {
+    sender: Sender<Ticket>,
+    counter: TickCounterToken,
+    expires: Tick,
     started: bool,
 }
 
-impl<S, T> DelayFuture<S, T>
-where T: Tick,
-      S: TimerStateRef<Tick = T> {
-    fn new(sender: Sender<Ticket<T>>, state: S, expires: T) -> Self {
+impl DelayFuture {
+    fn new(sender: Sender<Ticket>, counter: TickCounterToken, expires: Tick) -> Self {
         Self {
             sender,
-            state,
+            counter,
             expires,
             started: false,
         }
     }
 }
 
-impl<S, T> Unpin for DelayFuture<S, T>
-where T: Tick,
-      S: TimerStateRef<Tick = T>  {}
-
-impl<S, T> Future for DelayFuture<S, T>
-where T: Tick,
-      S: TimerStateRef<Tick = T> {
+impl Future for DelayFuture {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -216,7 +137,7 @@ where T: Tick,
             // expiration. This ensures that we wait for no less than
             // the specified duration, and possibly one tick longer
             // than desired.
-            if self.state.get_count() > self.expires {
+            if self.counter.get_count() > self.expires {
                 Poll::Ready(())
             } else {
                 Poll::Pending
@@ -225,30 +146,24 @@ where T: Tick,
     }
 }
 
-pub struct TimeoutFuture<S, T, F>
-where T: Tick,
-      S: TimerStateRef<Tick = T>,
-      F: Future {
+pub struct TimeoutFuture<F>
+where F: Future {
     future: F,
-    delay: DelayFuture<S, T>,
+    delay: DelayFuture,
 }
 
-impl<S, T, F> TimeoutFuture<S, T, F>
-where T: Tick,
-      S: TimerStateRef<Tick = T>,
-      F: Future {
-    fn new(future: F, sender: Sender<Ticket<T>>, state: S, expires: T) -> Self {
+impl<F> TimeoutFuture<F>
+where F: Future {
+    fn new(future: F, sender: Sender<Ticket>, counter: TickCounterToken, expires: Tick) -> Self {
         Self {
             future,
-            delay: DelayFuture::new(sender, state, expires),
+            delay: DelayFuture::new(sender, counter, expires),
         }
     }
 }
 
-impl<S, T, F> Future for TimeoutFuture<S, T, F>
-where T: Tick,
-      S: TimerStateRef<Tick = T>,
-      F: Future {
+impl<F> Future for TimeoutFuture<F>
+where F: Future {
     type Output = Result<F::Output, ()>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -271,21 +186,18 @@ where T: Tick,
 }
 
 #[derive(Clone)]
-pub struct Timer<S, T>
-where T: Tick,
-      S: TimerStateRef<Tick = T> {
+pub struct Timer
+where {
     rate: Hertz,
-    state: S,
-    sender: Sender<Ticket<T>>,
+    counter: TickCounterToken,
+    sender: Sender<Ticket>,
 }
 
-impl<S, T> Timer<S, T>
-where S: TimerStateRef<Tick = T>,
-      T: Tick {
-    pub fn new(rate: Hertz, state: S, sender: Sender<Ticket<T>>) -> Self {
+impl Timer {
+    pub fn new(rate: Hertz, counter: TickCounterToken, sender: Sender<Ticket>) -> Self {
         Self {
             rate,
-            state,
+            counter,
             sender,
         }
     }
@@ -294,104 +206,94 @@ where S: TimerStateRef<Tick = T>,
         self.rate
     }
 
-    fn get_count(&self) -> T {
-        self.state.get_count()
+    fn get_count(&self) -> Tick {
+        self.counter.get_count()
     }
 
-    fn delay_to_ticks<D: Duration + Into<Milliseconds>>(&self, duration: D) -> T {
+    fn delay_to_ticks<D: Duration + Into<Milliseconds>>(&self, duration: D) -> Tick {
         let ms: Milliseconds = duration.into();
         let rate = self.get_rate().to_duration::<Milliseconds>().unwrap();
 
         assert!(ms.integer() == 0 || ms >= rate);
 
-        let ticks = ms.integer() / rate.integer();
+        let ticks: Tick = (ms.integer() / rate.integer()).into();
 
-        self.get_count() + ticks.into()
+        self.get_count() + ticks
     }
 
     pub fn delay(&self, duration: Milliseconds) -> impl Future {
         DelayFuture::new(self.sender.clone(),
-                         self.state.clone(),
+                         self.counter.clone(),
                          self.delay_to_ticks(duration))
     }
 
     pub fn timeout<F: Future>(&self, future: F, duration: Milliseconds)
-                   -> TimeoutFuture<S, T, F> {
+                   -> TimeoutFuture<F> {
         TimeoutFuture::new(future,
                            self.sender.clone(),
-                           self.state.clone(),
+                           self.counter.clone(),
                            self.delay_to_ticks(duration))
     }
 }
 
-struct TimerFuture<T, S>
-where T: Tick,
-      S: TimerStateRef<Tick = T> {
-    state: S,
-    expires: Option<T>,
+struct TimerFuture {
+    counter: TickCounterToken,
+    expires: Option<Tick>,
 }
 
-impl<T, S> TimerFuture<T, S>
-where T: Tick,
-      S: TimerStateRef<Tick = T> {
-    fn new(state: S) -> Self {
+impl TimerFuture {
+    fn new(counter: TickCounterToken) -> Self {
         Self {
-            state,
+            counter,
             expires: None,
         }
     }
 }
 
-impl<T, S> Stream for TimerFuture<T, S>
-where T: Tick,
-      S: TimerStateRef<Tick = T> {
+impl Stream for TimerFuture {
     type Item = ();
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if let Some(expires) = self.expires {
-            if self.state.get_count() >= expires {
+            if self.counter.get_count() >= expires {
                 self.expires = None;
                 return Poll::Ready(Some(()))
             }
         } else {
-            self.expires = Some(self.state.get_count() + 1.into());
+            self.expires = Some(self.counter.get_count() + 1_u64);
         }
 
-        self.state.register_waker(cx.waker());
+        self.counter.register_waker(cx.waker());
         Poll::Pending
     }
 }
 
-pub struct Scheduler<S, T, const N: usize>
-where T: Tick,
-      S: TimerStateRef<Tick = T>  {
+pub struct Scheduler<const N: usize> {
     rate: Hertz,
-    state: S,
-    sender: Sender<Ticket<T>>,
-    receiver: Receiver<Ticket<T>, Min, N>
+    counter: TickCounterToken,
+    sender: Sender<Ticket>,
+    receiver: Receiver<Ticket, Min, N>
 }
 
-impl<S, T, const N: usize> Scheduler<S, T, N>
-where T: Tick,
-      S: TimerStateRef<Tick = T>  {
-    pub fn new(rate: Hertz, state: S) -> Self {
+impl<const N: usize> Scheduler<N> {
+    pub fn new(rate: Hertz, counter: TickCounterToken) -> Self {
         let (sender, receiver) = channel();
 
         Self {
             rate,
-            state,
+            counter,
             sender,
             receiver,
         }
     }
 
-    pub fn get_timer(&self) -> Timer<S, T> {
-        Timer::new(self.rate, self.state.clone(), self.sender.clone())
+    pub fn get_timer(&self) -> Timer {
+        Timer::new(self.rate, self.counter.clone(), self.sender.clone())
     }
 
     fn next_waker(&mut self) -> Option<Waker> {
         if let Ok(ticket) = self.receiver.peek_mut() {
-            if self.state.get_count() > ticket.expires {
+            if self.counter.get_count() > ticket.expires {
                 return Some(PeekMut::pop(ticket).waker);
             }
         }
@@ -400,7 +302,7 @@ where T: Tick,
     }
 
     pub async fn task(&mut self) {
-        let mut timer = TimerFuture::new(self.state.clone());
+        let mut timer = TimerFuture::new(self.counter.clone());
 
         loop {
             if let Some(waker) = self.next_waker() {
@@ -414,7 +316,7 @@ where T: Tick,
 
 #[cfg(test)]
 mod tests {
-    use core::sync::atomic::AtomicU32;
+    use core::sync::atomic::Ordering;
 
     use crate::executor::Executor;
     use crate::common::tests::MockWaker;
@@ -458,89 +360,84 @@ mod tests {
 
     #[test]
     fn state() {
-        let state: &'static AtomicTimerState<u32, AtomicU32> = Box::leak(
-            Box::new(AtomicTimerState::new()));
-        let stateref = state.get_ref();
+        let counter = Box::leak(Box::new(TickCounter::new()));
+        let token = counter.get_token();
 
-        assert_eq!(stateref.get_count(), 0);
+        assert_eq!(token.get_count(), 0);
 
-        state.increment_count();
-        assert_eq!(stateref.get_count(), 1);
-
-        state.add_count(10);
-        assert_eq!(stateref.get_count(), 11);
-
-        state.set_count(0);
-        assert_eq!(stateref.get_count(), 0);
+        unsafe { counter.increment() };
+        assert_eq!(token.get_count(), 1);
 
         let mockwaker = Arc::new(MockWaker::new());
         let waker: Waker = mockwaker.clone().into();
 
-        stateref.register_waker(&waker);
-        state.wake();
+        token.register_waker(&waker);
+        counter.wake();
 
         assert_eq!(mockwaker.woke.load(Ordering::Relaxed), true);
 
         mockwaker.woke.store(false, Ordering::Relaxed);
-        stateref.register_waker(&waker);
+        token.register_waker(&waker);
 
-        state.tick();
-        assert_eq!(stateref.get_count(), 1);
+        unsafe { counter.tick(); }
+        assert_eq!(token.get_count(), 2);
         assert_eq!(mockwaker.woke.load(Ordering::Relaxed), true);
     }
 
     #[test]
     fn delay() {
-        let state: &'static AtomicTimerState<u32, AtomicU32> = Box::leak(
-            Box::new(AtomicTimerState::new()));
-        let stateref = state.get_ref();
-        let (sender, mut receiver) = channel::<Ticket<u32>, Min, 10>();
+        let counter = Box::leak(Box::new(TickCounter::new()));
+        let token = counter.get_token();
+        let scheduler: &'static mut Scheduler<10>
+            = Box::leak(Box::new(Scheduler::new(1000.Hz(), token.clone())));
+        let sender = scheduler.sender.clone();
         let mockwaker = Arc::new(MockWaker::new());
         let waker: Waker = mockwaker.clone().into();
         let mut cx = Context::from_waker(&waker);
 
-        let mut future = DelayFuture::new(sender.clone(), stateref.clone(), 10);
+        let mut future = DelayFuture::new(sender.clone(), token.clone(), 1);
 
         assert_eq!(Pin::new(&mut future).poll(&mut cx), Poll::Pending);
         assert_eq!(Pin::new(&mut future).poll(&mut cx), Poll::Pending);
         assert_eq!(Pin::new(&mut future).poll(&mut cx), Poll::Pending);
         assert_eq!(future.started, true);
 
-        state.set_count(11);
+        unsafe {
+            counter.tick();
+            counter.tick();
+        }
 
         assert_eq!(Pin::new(&mut future).poll(&mut cx), Poll::Ready(()));
 
-        let mut future = DelayFuture::new(sender.clone(), stateref.clone(), 20);
+        let mut future = DelayFuture::new(sender.clone(), token.clone(), 20);
 
         assert_eq!(Pin::new(&mut future).poll(&mut cx), Poll::Pending);
 
-        let mut future = DelayFuture::new(sender.clone(), stateref.clone(), 15);
+        let mut future = DelayFuture::new(sender.clone(), token.clone(), 15);
 
         assert_eq!(Pin::new(&mut future).poll(&mut cx), Poll::Pending);
 
-
-        if let Ok(ticket) = receiver.recv() {
-            assert_eq!(ticket.expires, 10);
+        if let Ok(ticket) = scheduler.receiver.recv() {
+            assert_eq!(ticket.expires, 1);
             ticket.waker.wake();
             assert_eq!(mockwaker.woke.load(Ordering::Relaxed), true)
         }
 
-        if let Ok(ticket) = receiver.recv() {
+        if let Ok(ticket) = scheduler.receiver.recv() {
             assert_eq!(ticket.expires, 15);
         }
 
-        if let Ok(ticket) = receiver.recv() {
+        if let Ok(ticket) = scheduler.receiver.recv() {
             assert_eq!(ticket.expires, 20);
         }
     }
 
     #[test]
     fn timer() {
-        let state: &'static AtomicTimerState<u32, AtomicU32> = Box::leak(
-            Box::new(AtomicTimerState::new()));
-        let stateref = state.get_ref();
-        let scheduler: &'static mut Scheduler<_, _, 10>
-            = Box::leak(Box::new(Scheduler::new(1000.Hz(), stateref.clone())));
+        let counter = Box::leak(Box::new(TickCounter::new()));
+        let token = counter.get_token();
+        let scheduler: &'static mut Scheduler<10>
+            = Box::leak(Box::new(Scheduler::new(1000.Hz(), token.clone())));
         let timer = scheduler.get_timer();
         let mut executor = Box::new(Executor::<10>::new());
         let queue =  Arc::new(ArrayQueue::new(10));
@@ -550,7 +447,7 @@ mod tests {
         let test_future = |queue, timer| {
             move || {
                 async fn future(queue: Arc<ArrayQueue<u32>>,
-                                timer: Timer<AtomicTimerStateRef<u32, AtomicU32>, u32>) {
+                                timer: Timer) {
                     queue.push(1).unwrap();
 
                     timer.delay(0.milliseconds()).await;
@@ -589,46 +486,46 @@ mod tests {
         assert_eq!(queue.pop(), Some(1));
         assert_eq!(queue.pop(), None);
 
-        state.tick();
+        unsafe { counter.tick(); }
         unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), Some(2));
         assert_eq!(queue.pop(), None);
 
-        state.wake();
+        counter.wake();
         unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), None);
 
-        state.tick();
-        state.tick();
+        unsafe { counter.tick(); }
+        unsafe { counter.tick(); }
         unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), Some(3));
         assert_eq!(queue.pop(), None);
 
-        state.tick();
-        state.tick();
+        unsafe { counter.tick(); }
+        unsafe { counter.tick(); }
         unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), Some(4));
         assert_eq!(queue.pop(), None);
 
-        state.tick();
-        state.tick();
+        unsafe { counter.tick(); }
+        unsafe { counter.tick(); }
         unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), Some(5));
         assert_eq!(queue.pop(), None);
 
         for _ in 0..10 {
-            state.tick();
+            unsafe { counter.tick(); }
             unsafe { executor.poll_tasks(); }
 
             assert_eq!(queue.pop(), None);
         }
 
-        state.tick();
+        unsafe { counter.tick(); }
         unsafe { executor.poll_tasks(); }
 
         assert_eq!(queue.pop(), Some(6));
@@ -637,11 +534,10 @@ mod tests {
 
     #[test]
     fn timeout() {
-        let state: &'static AtomicTimerState<u32, AtomicU32> = Box::leak(
-            Box::new(AtomicTimerState::new()));
-        let stateref = state.get_ref();
-        let scheduler: &'static mut Scheduler<_, _, 10>
-            = Box::leak(Box::new(Scheduler::new(1000.Hz(), stateref.clone())));
+        let counter = Box::leak(Box::new(TickCounter::new()));
+        let token = counter.get_token();
+        let scheduler: &'static mut Scheduler<10>
+            = Box::leak(Box::new(Scheduler::new(1000.Hz(), token.clone())));
         let timer = scheduler.get_timer();
         let mut executor = Executor::<10>::new();
         let queue =  Arc::new(ArrayQueue::new(10));
@@ -650,12 +546,12 @@ mod tests {
 
         let waiting_future = |queue, timer| {
             move || {
-                async fn slow_future(timer: Timer<AtomicTimerStateRef<u32, AtomicU32>, u32>) {
+                async fn slow_future(timer: Timer) {
                     timer.delay(1000.milliseconds()).await;
                 }
 
                 async fn future(queue: Arc<ArrayQueue<u32>>,
-                                timer: Timer<AtomicTimerStateRef<u32, AtomicU32>, u32>) {
+                                timer: Timer) {
                     queue.push(1).unwrap();
 
                     assert_eq!(timer.timeout(slow_future(timer.clone()), 100.milliseconds()).await,
@@ -681,8 +577,11 @@ mod tests {
         assert_eq!(queue.pop(), Some(1));
         assert_eq!(queue.pop(), None);
 
-        state.add_count(101);
-        state.wake();
+        for _ in 0..101 {
+            unsafe { counter.increment(); }
+        }
+
+        counter.wake();
 
         unsafe { executor.poll_tasks(); }
 
@@ -690,16 +589,16 @@ mod tests {
         assert_eq!(queue.pop(), None);
 
         for _ in 0..1000 {
-            state.increment_count();
-            state.wake();
+            unsafe { counter.increment(); }
+            counter.wake();
 
             unsafe { executor.poll_tasks(); }
 
             assert_eq!(queue.pop(), None);
         }
 
-        state.increment_count();
-        state.wake();
+        unsafe { counter.increment(); }
+        counter.wake();
 
         unsafe { executor.poll_tasks(); }
 
