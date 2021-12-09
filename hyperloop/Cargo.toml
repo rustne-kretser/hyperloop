@@ -22,3 +22,6 @@ default-features = false
 
 [dependencies.heapless]
 version = "0.7"
+
+[dependencies.hyperloop-macros]
+path = "../hyperloop-macros"
