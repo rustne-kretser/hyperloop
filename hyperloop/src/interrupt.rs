@@ -1,21 +1,18 @@
-use core::{pin::Pin, task::{Context, Poll, Waker}};
+use core::{pin::Pin, task::{Context, Poll, RawWaker, RawWakerVTable, Waker}};
 
 use core::future::Future;
 
-use alloc::{boxed::Box, sync::Arc, task::Wake};
-
-struct InterruptWaker {}
-
-impl InterruptWaker {
-    fn new() -> Self {
-        Self { }
-    }
+unsafe fn clone(ptr: *const ()) -> RawWaker {
+    RawWaker::new(ptr, &VTABLE)
 }
 
-impl Wake for InterruptWaker {
-    fn wake(self: alloc::sync::Arc<Self>) {
-    }
+unsafe fn wake(_ptr: *const ()) {
 }
+
+unsafe fn drop(_ptr: *const ()) {
+}
+
+const VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake, drop);
 
 #[derive(Debug)]
 struct YieldFuture {
@@ -43,23 +40,33 @@ impl Future for YieldFuture {
     }
 }
 
-pub struct Interrupt {
-    future: Pin<Box<dyn Future<Output = ()> + Sync>>,
-    waker: Waker,
+pub struct Interrupt<F>
+where F: Future<Output = ()> + 'static {
+    future: F,
 }
 
-impl Interrupt {
-    pub fn new(future: Pin<Box<dyn Future<Output = ()> + Sync>>) -> Self {
+impl<F> Interrupt<F>
+where F: Future<Output = ()> + 'static {
+    pub fn new(future_fn: impl FnOnce() -> F) -> Self {
         Self {
-            future,
-            waker: Arc::new(InterruptWaker::new()).into(),
+            future: future_fn(),
         }
     }
 
-    pub fn poll(&mut self) {
-        let mut cx = Context::from_waker(&self.waker);
+    fn get_waker(&self) -> Waker {
+        unsafe {
+            Waker::from_raw(RawWaker::new((self as *const Self).cast(),
+                                          &VTABLE))
+        }
+    }
 
-        let _ = self.future.as_mut().poll(&mut cx);
+    pub fn poll(&'static mut self) {
+        let waker = self.get_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let future = unsafe { Pin::new_unchecked(&mut self.future) };
+
+        let _ = future.poll(&mut cx);
     }
 }
 
@@ -71,15 +78,17 @@ pub fn yield_now() -> impl Future<Output = ()> {
 mod tests {
     use core::task::Waker;
 
-    use alloc::{boxed::Box, sync::Arc};
+    use std::{boxed::Box, sync::Arc};
     use crossbeam_queue::ArrayQueue;
+
+    use crate::common::tests::MockWaker;
 
     use super::*;
 
     #[test]
     fn test_yield_now() {
         let mut future = Box::pin(yield_now());
-        let mockwaker = Arc::new(InterruptWaker::new());
+        let mockwaker = Arc::new(MockWaker::new());
         let waker: Waker = mockwaker.into();
         let mut cx = Context::from_waker(&waker);
 
@@ -102,10 +111,18 @@ mod tests {
                 }
             }
 
-            static mut INTERRUPT: Option<Interrupt> = None;
+            type F = impl Future<Output = ()> + 'static;
+
+            static mut INTERRUPT: Option<Interrupt<F>> = None;
+
+            fn get_future() -> impl FnOnce() -> F {
+                || {
+                    async_handler()
+                }
+            }
 
             let interrupt = unsafe {
-                INTERRUPT.get_or_insert(Interrupt::new(Box::pin(async_handler())))
+                INTERRUPT.get_or_insert(Interrupt::new(get_future()))
             };
 
             interrupt.poll();

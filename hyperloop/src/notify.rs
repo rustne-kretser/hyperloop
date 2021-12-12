@@ -1,34 +1,42 @@
 use core::{pin::Pin, sync::atomic::{AtomicBool, Ordering}, task::{Context, Poll}};
 
-use alloc::sync::Arc;
 use futures::task::AtomicWaker;
 
 use core::future::Future;
 
-
 #[derive(Debug)]
-struct Shared {
+pub struct Notification {
     ready: AtomicBool,
     waker: AtomicWaker,
 }
 
-impl Shared {
-    fn new() -> Self {
+impl Notification {
+    pub const fn new() -> Self {
         Self {
             ready: AtomicBool::new(false),
             waker: AtomicWaker::new(),
         }
     }
+
+    pub fn notify(&self) {
+        self.ready.store(true, Ordering::Relaxed);
+        self.waker.wake();
+    }
+
+    pub fn wait(&'static self) -> NotificationFuture {
+        self.ready.store(false, Ordering::Relaxed);
+        NotificationFuture::new(&self)
+    }
 }
 
 pub struct NotificationFuture {
-    shared: Arc<Shared>,
+    notification: &'static Notification,
 }
 
 impl NotificationFuture {
-    fn new(shared: Arc<Shared>) -> Self {
+    fn new(shared: &'static Notification) -> Self {
         Self {
-            shared,
+            notification: shared,
         }
     }
 }
@@ -37,58 +45,19 @@ impl Future for NotificationFuture {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.shared.ready.load(Ordering::Relaxed) {
+        if self.notification.ready.load(Ordering::Relaxed) {
             Poll::Ready(())
         } else {
-            self.shared.waker.register(cx.waker());
+            self.notification.waker.register(cx.waker());
             Poll::Pending
         }
     }
 }
 
-#[derive(Debug)]
-pub struct Sender {
-    shared: Arc<Shared>,
-}
-
-impl Sender {
-    fn new(shared: Arc<Shared>) -> Self {
-        Self {
-            shared,
-        }
-    }
-
-    pub fn notify(&self) {
-        self.shared.ready.store(true, Ordering::Relaxed);
-        self.shared.waker.wake();
-    }
-}
-
-pub struct Receiver {
-    shared: Arc<Shared>,
-}
-
-impl Receiver {
-    fn new(shared: Arc<Shared>) -> Self {
-        Self {
-            shared,
-        }
-    }
-
-    pub fn wait(&self) -> NotificationFuture {
-        self.shared.ready.store(false, Ordering::Relaxed);
-        NotificationFuture::new(self.shared.clone())
-    }
-}
-
-pub fn notification() -> (Sender, Receiver) {
-    let shared = Arc::new(Shared::new());
-
-    (Sender::new(shared.clone()), Receiver::new(shared))
-}
-
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::boxed::Box;
     use crossbeam_queue::ArrayQueue;
 
     use crate::{executor::Executor, task::Task};
@@ -97,25 +66,26 @@ mod tests {
 
     #[test]
     fn notify() {
-        let (sender, receiver) = notification();
+        let notification = Box::leak(Box::new(Notification::new()));
 
         let mut executor = Executor::<10>::new();
         let queue =  Arc::new(ArrayQueue::new(10));
 
         let wait = |receiver, queue| {
             move || {
-                async fn future(receiver: Receiver, queue: Arc<ArrayQueue<u32>>) {
+                async fn future(notification: &'static Notification,
+                                queue: Arc<ArrayQueue<u32>>) {
                     queue.push(1).unwrap();
-                    receiver.wait().await;
+                    notification.wait().await;
                     queue.push(2).unwrap();
-                    receiver.wait().await;
+                    notification.wait().await;
                     queue.push(3).unwrap();
                 }
                 future(receiver, queue)
             }
         };
 
-        let task1 = Task::new(wait(receiver, queue.clone()), 1);
+        let task1 = Task::new(wait(notification, queue.clone()), 1);
 
         task1.add_to_executor(executor.get_sender()).unwrap();
 
@@ -128,7 +98,7 @@ mod tests {
 
         assert_eq!(queue.pop(), None);
 
-        sender.notify();
+        notification.notify();
 
         unsafe { executor.poll_tasks(); }
 
@@ -140,7 +110,7 @@ mod tests {
         assert_eq!(queue.pop(), None);
 
 
-        sender.notify();
+        notification.notify();
 
         unsafe { executor.poll_tasks(); }
 

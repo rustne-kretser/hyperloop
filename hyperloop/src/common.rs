@@ -2,7 +2,7 @@
 pub mod tests {
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    use alloc::{sync::Arc, task::Wake};
+    use std::{sync::Arc, task::Wake};
 
     pub struct MockWaker {
         pub woke: AtomicBool,

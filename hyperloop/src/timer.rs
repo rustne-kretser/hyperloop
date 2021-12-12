@@ -327,7 +327,7 @@ mod tests {
 
     use super::*;
 
-    use alloc::{boxed::Box, sync::Arc};
+    use std::{boxed::Box, sync::Arc};
     use crossbeam_queue::ArrayQueue;
     use embedded_time::rate::Extensions;
     use embedded_time::duration::Extensions as Ext;

@@ -84,7 +84,7 @@ mod tests {
     fn test_executor() {
         use super::*;
         use crossbeam_queue::ArrayQueue;
-        use alloc::sync::Arc;
+        use std::sync::Arc;
 
         let mut executor = Executor::<10>::new();
         let queue =  Arc::new(ArrayQueue::new(10));
