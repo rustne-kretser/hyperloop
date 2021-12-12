@@ -322,7 +322,7 @@ mod tests {
     use core::sync::atomic::Ordering;
 
     use crate::executor::Executor;
-    use crate::common::tests::MockWaker;
+    use crate::common::tests::{MockWaker, log_init};
     use crate::task::Task;
 
     use super::*;
@@ -332,34 +332,6 @@ mod tests {
     use embedded_time::rate::Extensions;
     use embedded_time::duration::Extensions as Ext;
     use core::future::Future;
-
-    use log::{Record, Level, Metadata};
-
-    struct SimpleLogger;
-
-    use log::LevelFilter;
-
-    static LOGGER: SimpleLogger = SimpleLogger;
-
-    fn log_init() {
-        let _ = log::set_logger(&LOGGER)
-            .map(|()| log::set_max_level(LevelFilter::Info));
-    }
-
-
-    impl log::Log for SimpleLogger {
-        fn enabled(&self, metadata: &Metadata) -> bool {
-            metadata.level() <= Level::Info
-        }
-
-        fn log(&self, record: &Record) {
-            if self.enabled(record.metadata()) {
-                println!("{} - {}", record.level(), record.args());
-            }
-        }
-
-        fn flush(&self) {}
-    }
 
     #[test]
     fn state() {
