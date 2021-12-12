@@ -4,10 +4,9 @@ use embedded_time::{duration::{Duration, Milliseconds}, fixed_point::FixedPoint,
 
 use core::future::Future;
 use futures::{Stream, StreamExt, task::AtomicWaker};
-use heapless::binary_heap::{Min, PeekMut};
 use log::error;
 
-use crate::priority_channel::{Item, Receiver, Sender, channel};
+use crate::priority_queue::{Min, PeekMut, PriorityQueue, Sender};
 
 type Tick = u64;
 
@@ -82,8 +81,6 @@ impl Ticket {
     }
 }
 
-impl Item for Ticket {}
-
 impl PartialEq for Ticket {
     fn eq(&self, other: &Self) -> bool {
         self.expires == other.expires
@@ -104,15 +101,17 @@ impl Ord for Ticket {
     }
 }
 
-struct DelayFuture {
-    sender: Sender<Ticket>,
+struct DelayFuture<S>
+where S: Sender<Item = Ticket> {
+    sender: S,
     counter: TickCounterToken,
     expires: Tick,
     started: bool,
 }
 
-impl DelayFuture {
-    fn new(sender: Sender<Ticket>, counter: TickCounterToken, expires: Tick) -> Self {
+impl<S> DelayFuture<S>
+where S: Sender<Item = Ticket> {
+    fn new(sender: S, counter: TickCounterToken, expires: Tick) -> Self {
         Self {
             sender,
             counter,
@@ -122,7 +121,11 @@ impl DelayFuture {
     }
 }
 
-impl Future for DelayFuture {
+impl<S> Unpin for DelayFuture<S>
+where S: Sender<Item = Ticket> {}
+
+impl<S> Future for DelayFuture<S>
+where S: Sender<Item = Ticket> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -146,15 +149,17 @@ impl Future for DelayFuture {
     }
 }
 
-pub struct TimeoutFuture<F>
-where F: Future {
+pub struct TimeoutFuture<S, F>
+where S: Sender<Item = Ticket>,
+      F: Future {
     future: F,
-    delay: DelayFuture,
+    delay: DelayFuture<S>,
 }
 
-impl<F> TimeoutFuture<F>
-where F: Future {
-    fn new(future: F, sender: Sender<Ticket>, counter: TickCounterToken, expires: Tick) -> Self {
+impl<S, F> TimeoutFuture<S, F>
+where S: Sender<Item = Ticket>,
+      F: Future {
+    fn new(future: F, sender: S, counter: TickCounterToken, expires: Tick) -> Self {
         Self {
             future,
             delay: DelayFuture::new(sender, counter, expires),
@@ -162,8 +167,9 @@ where F: Future {
     }
 }
 
-impl<F> Future for TimeoutFuture<F>
-where F: Future {
+impl<S, F> Future for TimeoutFuture<S, F>
+where S: Sender<Item = Ticket>,
+      F: Future {
     type Output = Result<F::Output, ()>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -186,15 +192,16 @@ where F: Future {
 }
 
 #[derive(Clone)]
-pub struct Timer
-where {
+pub struct Timer<S>
+where S: Sender<Item = Ticket> {
     rate: Hertz,
     counter: TickCounterToken,
-    sender: Sender<Ticket>,
+    sender: S,
 }
 
-impl Timer {
-    pub fn new(rate: Hertz, counter: TickCounterToken, sender: Sender<Ticket>) -> Self {
+impl<S> Timer<S>
+where S: Sender<Item = Ticket> + Clone {
+    pub fn new(rate: Hertz, counter: TickCounterToken, sender: S) -> Self {
         Self {
             rate,
             counter,
@@ -228,7 +235,7 @@ impl Timer {
     }
 
     pub fn timeout<F: Future>(&self, future: F, duration: Milliseconds)
-                   -> TimeoutFuture<F> {
+                   -> TimeoutFuture<S, F> {
         TimeoutFuture::new(future,
                            self.sender.clone(),
                            self.counter.clone(),
@@ -271,28 +278,24 @@ impl Stream for TimerFuture {
 pub struct Scheduler<const N: usize> {
     rate: Hertz,
     counter: TickCounterToken,
-    sender: Sender<Ticket>,
-    receiver: Receiver<Ticket, Min, N>
+    queue: PriorityQueue<Ticket, Min, N>,
 }
 
 impl<const N: usize> Scheduler<N> {
     pub fn new(rate: Hertz, counter: TickCounterToken) -> Self {
-        let (sender, receiver) = channel();
-
         Self {
             rate,
             counter,
-            sender,
-            receiver,
+            queue: PriorityQueue::new(),
         }
     }
 
-    pub fn get_timer(&self) -> Timer {
-        Timer::new(self.rate, self.counter.clone(), self.sender.clone())
+    pub fn get_timer(&self) -> Timer<impl Sender<Item = Ticket>> {
+        Timer::new(self.rate, self.counter.clone(), self.queue.get_sender())
     }
 
     fn next_waker(&mut self) -> Option<Waker> {
-        if let Ok(ticket) = self.receiver.peek_mut() {
+        if let Some(ticket) = self.queue.peek_mut().as_mut() {
             if self.counter.get_count() > ticket.expires {
                 return Some(PeekMut::pop(ticket).waker);
             }
@@ -390,7 +393,7 @@ mod tests {
         let token = counter.get_token();
         let scheduler: &'static mut Scheduler<10>
             = Box::leak(Box::new(Scheduler::new(1000.Hz(), token.clone())));
-        let sender = scheduler.sender.clone();
+        let sender = scheduler.queue.get_sender();
         let mockwaker = Arc::new(MockWaker::new());
         let waker: Waker = mockwaker.clone().into();
         let mut cx = Context::from_waker(&waker);
@@ -417,17 +420,17 @@ mod tests {
 
         assert_eq!(Pin::new(&mut future).poll(&mut cx), Poll::Pending);
 
-        if let Ok(ticket) = scheduler.receiver.recv() {
+        if let Some(ticket) = scheduler.queue.pop() {
             assert_eq!(ticket.expires, 1);
             ticket.waker.wake();
             assert_eq!(mockwaker.woke.load(Ordering::Relaxed), true)
         }
 
-        if let Ok(ticket) = scheduler.receiver.recv() {
+        if let Some(ticket) = scheduler.queue.pop() {
             assert_eq!(ticket.expires, 15);
         }
 
-        if let Ok(ticket) = scheduler.receiver.recv() {
+        if let Some(ticket) = scheduler.queue.pop() {
             assert_eq!(ticket.expires, 20);
         }
     }
@@ -446,8 +449,8 @@ mod tests {
 
         let test_future = |queue, timer| {
             move || {
-                async fn future(queue: Arc<ArrayQueue<u32>>,
-                                timer: Timer) {
+                async fn future<S: Sender<Item = Ticket> + Clone>(queue: Arc<ArrayQueue<u32>>,
+                                                                  timer: Timer<S>) {
                     queue.push(1).unwrap();
 
                     timer.delay(0.milliseconds()).await;
@@ -546,12 +549,12 @@ mod tests {
 
         let waiting_future = |queue, timer| {
             move || {
-                async fn slow_future(timer: Timer) {
+                async fn slow_future<S:Sender<Item = Ticket> + Clone>(timer: Timer<S>) {
                     timer.delay(1000.milliseconds()).await;
                 }
 
-                async fn future(queue: Arc<ArrayQueue<u32>>,
-                                timer: Timer) {
+                async fn future<S: Sender<Item = Ticket> + Clone>(queue: Arc<ArrayQueue<u32>>,
+                                                                  timer: Timer<S>) {
                     queue.push(1).unwrap();
 
                     assert_eq!(timer.timeout(slow_future(timer.clone()), 100.milliseconds()).await,

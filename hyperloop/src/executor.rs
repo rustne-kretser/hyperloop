@@ -1,8 +1,8 @@
 use core::cmp::Ordering;
 
-use heapless::binary_heap::Max;
+use crate::priority_queue::{Max, PriorityQueue, Sender};
 
-use crate::{priority_channel::{Item, Receiver, Sender, channel}, task::PollTask};
+use crate::task::PollTask;
 
 pub(crate) type Priority = u8;
 
@@ -11,8 +11,6 @@ pub struct Ticket {
     task: *const dyn PollTask,
     priority: Priority,
 }
-
-impl Item for Ticket {}
 
 impl Ticket {
     pub(crate) fn new(task: *const dyn PollTask, priority: Priority) -> Self {
@@ -47,21 +45,14 @@ impl Ord for Ticket {
     }
 }
 
-pub(crate) type TaskSender = Sender<Ticket>;
-pub(crate) type TaskReceiver<const N: usize> = Receiver<Ticket, Max, N>;
-
 pub struct Executor<const N: usize> {
-    sender: TaskSender,
-    receiver: TaskReceiver<N>,
+    queue: PriorityQueue<Ticket, Max, N>,
 }
 
 impl<const N: usize> Executor<N> {
     pub fn new() -> Self {
-        let (sender, receiver) = channel();
-
         Self {
-            sender,
-            receiver,
+            queue: PriorityQueue::new(),
         }
     }
 
@@ -75,13 +66,13 @@ impl<const N: usize> Executor<N> {
     /// be dereferenced at any time and will be dangling if the
     /// exeutor is moved or dropped.
     pub unsafe fn poll_tasks(&mut self) {
-        while let Ok(ticket) = self.receiver.recv() {
+        while let Some(ticket) = self.queue.pop() {
             let _ = ticket.get_task().poll();
         }
     }
 
-    pub fn get_sender(&self) -> TaskSender {
-        self.sender.clone()
+    pub fn get_sender(&self) -> impl Sender<Item = Ticket> {
+        self.queue.get_sender()
     }
 }
 

@@ -5,7 +5,7 @@
 
 extern crate alloc;
 
-mod priority_channel;
+mod priority_queue;
 mod common;
 
 pub mod timer;
