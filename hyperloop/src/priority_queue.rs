@@ -392,6 +392,12 @@ where T: PartialOrd + 'static,
 
 #[cfg(test)]
 mod tests {
+    use std::thread;
+
+    use std::vec::Vec;
+
+    use crate::common::tests::log_init;
+
     use super::*;
 
     #[test]
@@ -491,5 +497,64 @@ mod tests {
         assert_eq!(item.unwrap().pop(), 42);
 
         assert!(queue.peek_mut().is_none());
+    }
+
+    #[test]
+    fn channel_thread() {
+        #[derive(Debug)]
+        struct Item {
+            v1: usize,
+            v2: usize,
+            v3: usize,
+            v4: usize,
+        }
+
+        impl Item {
+            fn new(i: usize) -> Self {
+                Self {
+                    v1: i,
+                    v2: i + 1,
+                    v3: i + 2,
+                    v4: i + 3,
+                }
+            }
+        }
+
+        impl PartialEq for Item {
+            fn eq(&self, other: &Self) -> bool {
+                self.v1 == other.v1 && self.v2 == other.v2 && self.v3 == other.v3 && self.v4 == other.v4
+            }
+        }
+
+        impl PartialOrd for Item {
+            fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+                self.v1.partial_cmp(&other.v1)
+            }
+        }
+
+        log_init();
+
+        const N: usize = 1000;
+        let mut queue: PriorityQueue<Item, Min, N> = PriorityQueue::new();
+        let mut handlers = Vec::new();
+
+        for i in 0..10 {
+            let sender = queue.get_sender();
+            let handler = thread::spawn(move || {
+                for j in 0..100 {
+                    let item = Item::new(i*100 + j);
+                    sender.send(item).unwrap();
+                }
+            });
+            handlers.push(handler);
+        }
+
+        for handler in handlers {
+            handler.join().unwrap();
+        }
+
+        for i in 0..N {
+            assert_eq!(queue.pop(), Some(Item::new(i)));
+        }
     }
 }
