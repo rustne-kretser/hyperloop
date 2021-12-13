@@ -1,6 +1,6 @@
 use core::cmp::Ordering;
 
-use crate::priority_queue::{Max, PriorityQueue, Sender};
+use crate::priority_queue::{Max, PriorityQueue, PrioritySender};
 
 use crate::task::PollTask;
 
@@ -45,6 +45,8 @@ impl Ord for Ticket {
     }
 }
 
+pub(crate) type TaskSender = PrioritySender<Ticket>;
+
 pub struct Executor<const N: usize> {
     queue: PriorityQueue<Ticket, Max, N>,
 }
@@ -71,7 +73,7 @@ impl<const N: usize> Executor<N> {
         }
     }
 
-    pub fn get_sender(&self) -> impl Sender<Item = Ticket> {
+    pub fn get_sender(&self) -> TaskSender {
         self.queue.get_sender()
     }
 }

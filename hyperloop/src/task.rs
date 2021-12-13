@@ -3,20 +3,16 @@ use core::{lazy::OnceCell, pin::Pin, task::{Context, Poll, RawWaker, RawWakerVTa
 use futures::Future;
 use log::error;
 
-use crate::{executor::{Priority, Ticket}, priority_queue::Sender};
+use crate::{executor::{Priority, TaskSender, Ticket}, priority_queue::Sender};
 
-unsafe fn clone<F, S>(ptr: *const ()) -> RawWaker
-where F: Future<Output = ()> + 'static,
-      S: Sender<Item = Ticket> + 'static {
-    let task = &*(ptr as *const Task<F, S>);
+unsafe fn clone<F: Future<Output = ()> + 'static>(ptr: *const ()) -> RawWaker {
+    let task = &*(ptr as *const Task<F>);
 
     RawWaker::new(ptr, &task.vtable)
 }
 
-unsafe fn wake<F, S>(ptr: *const ())
-where F: Future<Output = ()> + 'static,
-    S: Sender<Item = Ticket> + 'static {
-        let task = &*(ptr as *const Task<F, S>);
+unsafe fn wake<F: Future<Output = ()> + 'static>(ptr: *const ()) {
+    let task = &*(ptr as *const Task<F>);
     task.wake();
 }
 
@@ -27,18 +23,16 @@ pub(crate) trait PollTask {
     unsafe fn poll(&self) -> Poll<()>;
 }
 
-pub struct Task<F, S>
-where F: Future<Output = ()> + 'static,
-      S: Sender<Item = Ticket> {
+pub struct Task<F>
+where F: Future<Output = ()> + 'static {
     future: F,
     priority: Priority,
-    sender: OnceCell<S>,
+    sender: OnceCell<TaskSender>,
     vtable: RawWakerVTable,
 }
 
-impl<F, S> Task<F, S>
-where F: Future<Output = ()> + 'static,
-      S: Sender<Item = Ticket> + 'static {
+impl<F> Task<F>
+where F: Future<Output = ()> + 'static {
     pub fn new(
         future_fn: impl FnOnce() -> F,
         priority: Priority,
@@ -47,9 +41,9 @@ where F: Future<Output = ()> + 'static,
             future: future_fn(),
             priority,
             sender: OnceCell::new(),
-            vtable: RawWakerVTable::new(clone::<F, S>,
-                                        wake::<F, S>,
-                                        wake::<F, S>,
+            vtable: RawWakerVTable::new(clone::<F>,
+                                        wake::<F>,
+                                        wake::<F>,
                                         drop),
         }
     }
@@ -63,7 +57,7 @@ where F: Future<Output = ()> + 'static,
     }
 
     unsafe fn get_waker(&self) -> Waker {
-        let ptr: *const () = (self as *const Task<F, S>).cast();
+        let ptr: *const () = (self as *const Task<F>).cast();
         let vtable = &self.as_static().vtable;
 
         Waker::from_raw(RawWaker::new(ptr, vtable))
@@ -73,12 +67,12 @@ where F: Future<Output = ()> + 'static,
         self.schedule().unwrap();
     }
 
-    pub fn add_to_executor(&self, sender: S) -> Result<(), ()> {
+    pub fn add_to_executor(&self, sender: TaskSender) -> Result<(), ()> {
         self.set_sender(sender)?;
         self.schedule()
     }
 
-    fn set_sender(&self, sender: S) -> Result<(), ()> {
+    fn set_sender(&self, sender: TaskSender) -> Result<(), ()> {
         match self.sender.set(sender) {
             Ok(_) => Ok(()),
             Err(_) => Err(()),
@@ -101,9 +95,8 @@ where F: Future<Output = ()> + 'static,
     }
 }
 
-impl<F, S> PollTask for Task<F, S>
-where F: Future<Output = ()> + 'static,
-      S: Sender<Item = Ticket> + 'static {
+impl<F> PollTask for Task<F>
+where F: Future<Output = ()> + 'static {
     unsafe fn poll(&self) -> Poll<()> {
         let waker = self.get_waker();
         let mut cx = Context::from_waker(&waker);
