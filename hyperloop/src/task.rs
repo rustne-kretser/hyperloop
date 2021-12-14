@@ -1,9 +1,16 @@
-use core::{lazy::OnceCell, pin::Pin, task::{Context, Poll, RawWaker, RawWakerVTable, Waker}};
+use core::{
+    lazy::OnceCell,
+    pin::Pin,
+    task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
+};
 
 use atomig::{Atom, Atomic, Ordering};
 use futures::Future;
 
-use crate::{executor::{Priority, TaskSender, Ticket}, priority_queue::Sender};
+use crate::{
+    executor::{Priority, TaskSender, Ticket},
+    priority_queue::Sender,
+};
 
 unsafe fn clone<F: Future<Output = ()> + 'static>(ptr: *const ()) -> RawWaker {
     let task = &*(ptr as *const Task<F>);
@@ -16,8 +23,7 @@ unsafe fn wake<F: Future<Output = ()> + 'static>(ptr: *const ()) {
     task.wake();
 }
 
-unsafe fn drop(_ptr: *const ()) {
-}
+unsafe fn drop(_ptr: *const ()) {}
 
 pub(crate) trait PollTask {
     unsafe fn poll(&self) -> Poll<()>;
@@ -31,7 +37,9 @@ enum TaskState {
 }
 
 pub struct Task<F>
-where F: Future<Output = ()> + 'static {
+where
+    F: Future<Output = ()> + 'static,
+{
     future: F,
     priority: Priority,
     sender: OnceCell<TaskSender>,
@@ -40,27 +48,24 @@ where F: Future<Output = ()> + 'static {
 }
 
 impl<F> Task<F>
-where F: Future<Output = ()> + 'static {
-    pub fn new(
-        future_fn: impl FnOnce() -> F,
-        priority: Priority,
-    ) -> Self {
+where
+    F: Future<Output = ()> + 'static,
+{
+    pub fn new(future_fn: impl FnOnce() -> F, priority: Priority) -> Self {
         Self {
             future: future_fn(),
             priority,
             sender: OnceCell::new(),
-            vtable: RawWakerVTable::new(clone::<F>,
-                                        wake::<F>,
-                                        wake::<F>,
-                                        drop),
+            vtable: RawWakerVTable::new(clone::<F>, wake::<F>, wake::<F>, drop),
             state: Atomic::new(TaskState::NotQueued),
         }
     }
 
     fn update_state(&self, old: TaskState, new: TaskState) -> bool {
-        if let Ok(_) = self.state.compare_exchange(old, new,
-                                                   Ordering::Relaxed,
-                                                   Ordering::Relaxed) {
+        if let Ok(_) = self
+            .state
+            .compare_exchange(old, new, Ordering::Relaxed, Ordering::Relaxed)
+        {
             true
         } else {
             false
@@ -115,8 +120,7 @@ where F: Future<Output = ()> + 'static {
 
     fn schedule(&self) -> Result<(), ()> {
         if self.update_state(TaskState::NotQueued, TaskState::Queued) {
-            let ticket = Ticket::new(self as *const Self,
-                                     self.priority);
+            let ticket = Ticket::new(self as *const Self, self.priority);
 
             match self.send_ticket(ticket) {
                 Ok(_) => Ok(()),
@@ -132,7 +136,9 @@ where F: Future<Output = ()> + 'static {
 }
 
 impl<F> PollTask for Task<F>
-where F: Future<Output = ()> + 'static {
+where
+    F: Future<Output = ()> + 'static,
+{
     unsafe fn poll(&self) -> Poll<()> {
         let waker = self.get_waker();
         let mut cx = Context::from_waker(&waker);
@@ -147,7 +153,10 @@ where F: Future<Output = ()> + 'static {
 
 #[cfg(test)]
 mod tests {
-    use crate::{interrupt::yield_now, priority_queue::{Max, PriorityQueue}};
+    use crate::{
+        interrupt::yield_now,
+        priority_queue::{Max, PriorityQueue},
+    };
 
     use super::*;
 
@@ -184,7 +193,9 @@ mod tests {
 
         assert!(queue.pop().is_none());
 
-        unsafe { assert_eq!(task.poll(), Poll::Pending); }
+        unsafe {
+            assert_eq!(task.poll(), Poll::Pending);
+        }
 
         assert_eq!(task.get_state(), TaskState::NotQueued);
 

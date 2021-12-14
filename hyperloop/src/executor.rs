@@ -14,10 +14,7 @@ pub struct Ticket {
 
 impl Ticket {
     pub(crate) fn new(task: *const dyn PollTask, priority: Priority) -> Self {
-        Self {
-            task,
-            priority,
-        }
+        Self { task, priority }
     }
 
     unsafe fn get_task(&self) -> &dyn PollTask {
@@ -80,17 +77,17 @@ impl<const N: usize> Executor<N> {
 
 #[cfg(test)]
 mod tests {
-    use hyperloop_macros::{executor_from_tasks, task};
     use crossbeam_queue::ArrayQueue;
+    use hyperloop_macros::{executor_from_tasks, task};
     use std::sync::Arc;
 
-    use crate::task::Task;
     use super::*;
+    use crate::task::Task;
 
     #[test]
     fn test_executor() {
         let mut executor = Executor::<10>::new();
-        let queue =  Arc::new(ArrayQueue::new(10));
+        let queue = Arc::new(ArrayQueue::new(10));
 
         let test_future = |queue, value| {
             move || {
@@ -112,7 +109,9 @@ mod tests {
         task3.add_to_executor(executor.get_sender()).unwrap();
         task4.add_to_executor(executor.get_sender()).unwrap();
 
-        unsafe { executor.poll_tasks(); }
+        unsafe {
+            executor.poll_tasks();
+        }
 
         assert_eq!(queue.pop().unwrap(), 4);
         assert_eq!(queue.pop().unwrap(), 2);
@@ -139,7 +138,9 @@ mod tests {
 
         let executor = executor_from_tasks!(task1, task2);
 
-        unsafe { executor.poll_tasks(); }
+        unsafe {
+            executor.poll_tasks();
+        }
 
         assert_eq!(queue.pop().unwrap(), 2);
         assert_eq!(queue.pop().unwrap(), 1);
