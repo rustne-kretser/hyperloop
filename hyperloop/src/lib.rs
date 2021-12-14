@@ -3,15 +3,14 @@
 #![feature(type_alias_impl_trait)]
 #![feature(once_cell)]
 
-mod priority_queue;
 mod common;
+mod priority_queue;
 
-pub mod timer;
-pub mod notify;
-pub mod interrupt;
-pub mod task;
 pub mod executor;
+pub mod interrupt;
+pub mod notify;
+pub mod task;
+pub mod timer;
 
 #[macro_use]
 extern crate std;
-

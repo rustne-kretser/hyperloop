@@ -1,4 +1,8 @@
-use core::{marker::PhantomData, ops::Deref, sync::atomic::{AtomicUsize, Ordering}};
+use core::{
+    marker::PhantomData,
+    ops::Deref,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 pub enum HeapKind {
     Max,
@@ -25,16 +29,20 @@ impl Kind for Max {
 }
 
 struct Node<'a, T, K, const N: usize>
-where T: PartialOrd,
-      K: Kind {
+where
+    T: PartialOrd,
+    K: Kind,
+{
     heap: &'a PriorityQueue<T, K, N>,
     pos: usize,
     _kind: PhantomData<K>,
 }
 
-impl <'a, T, K, const N: usize> Node<'a, T, K, N>
-where T: PartialOrd + 'static,
-      K: Kind + 'static {
+impl<'a, T, K, const N: usize> Node<'a, T, K, N>
+where
+    T: PartialOrd + 'static,
+    K: Kind + 'static,
+{
     fn new(heap: &'a PriorityQueue<T, K, N>, pos: usize) -> Self {
         Self {
             heap,
@@ -43,7 +51,7 @@ where T: PartialOrd + 'static,
         }
     }
 
-    fn get_node(&self, index: usize) -> Option<Self>  {
+    fn get_node(&self, index: usize) -> Option<Self> {
         if index < self.heap.heap_size {
             Some(Node::new(self.heap, index))
         } else {
@@ -121,7 +129,9 @@ pub trait Sender: Clone {
 }
 
 pub struct PrioritySender<T>
-where T: 'static {
+where
+    T: 'static,
+{
     slots: &'static [Option<T>],
     available: &'static AtomicUsize,
     stack_size: &'static AtomicUsize,
@@ -132,15 +142,14 @@ impl<T> Clone for PrioritySender<T> {
         Self {
             slots: self.slots.clone(),
             available: self.available.clone(),
-            stack_size: self.stack_size.clone() }
+            stack_size: self.stack_size.clone(),
+        }
     }
 }
 
 impl<T> PrioritySender<T> {
     unsafe fn slot_mut(&self, index: usize) -> &mut Option<T> {
-        &mut *((&self.slots[index]
-                as *const Option<T>)
-               as *mut Option<T>)
+        &mut *((&self.slots[index] as *const Option<T>) as *mut Option<T>)
     }
 
     fn stack_push(&self, item: T) -> Result<(), T> {
@@ -148,9 +157,12 @@ impl<T> PrioritySender<T> {
             let stack_size = self.stack_size.load(Ordering::Relaxed);
 
             if stack_size < self.slots.len() {
-                if let Ok(_) = self.stack_size.compare_exchange(stack_size, stack_size + 1,
-                                                                Ordering::Relaxed,
-                                                                Ordering::Relaxed) {
+                if let Ok(_) = self.stack_size.compare_exchange(
+                    stack_size,
+                    stack_size + 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
                     let index = self.slots.len() - stack_size - 1;
 
                     unsafe {
@@ -171,9 +183,12 @@ impl<T> PrioritySender<T> {
             let available = self.available.load(Ordering::Relaxed);
 
             if available > 0 {
-                if let Ok(_) = self.available.compare_exchange(available, available - 1,
-                                                               Ordering::Relaxed,
-                                                               Ordering::Relaxed) {
+                if let Ok(_) = self.available.compare_exchange(
+                    available,
+                    available - 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
                     break;
                 }
             } else {
@@ -183,7 +198,6 @@ impl<T> PrioritySender<T> {
 
         self.stack_push(item)
     }
-
 }
 
 impl<T> Sender for PrioritySender<T> {
@@ -195,22 +209,28 @@ impl<T> Sender for PrioritySender<T> {
 }
 
 pub struct PeekMut<'a, T, K, const N: usize>
-where T: PartialOrd,
-      K: Kind {
-    queue: &'a mut PriorityQueue<T, K, N>
+where
+    T: PartialOrd,
+    K: Kind,
+{
+    queue: &'a mut PriorityQueue<T, K, N>,
 }
 
 impl<'a, T, K, const N: usize> PeekMut<'a, T, K, N>
-where T: PartialOrd + 'static ,
-      K: Kind + 'static  {
+where
+    T: PartialOrd + 'static,
+    K: Kind + 'static,
+{
     pub fn pop(&mut self) -> T {
         self.queue.pop().unwrap()
     }
 }
 
 impl<'a, T, K, const N: usize> Deref for PeekMut<'a, T, K, N>
-where T: PartialOrd,
-      K: Kind {
+where
+    T: PartialOrd,
+    K: Kind,
+{
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -218,10 +238,11 @@ where T: PartialOrd,
     }
 }
 
-
 pub struct PriorityQueue<T, K, const N: usize>
-where T: PartialOrd,
-      K: Kind {
+where
+    T: PartialOrd,
+    K: Kind,
+{
     slots: [Option<T>; N],
     available: AtomicUsize,
     stack_size: AtomicUsize,
@@ -230,8 +251,10 @@ where T: PartialOrd,
 }
 
 impl<T, K, const N: usize> PriorityQueue<T, K, N>
-where T: PartialOrd + 'static,
-      K: Kind + 'static {
+where
+    T: PartialOrd + 'static,
+    K: Kind + 'static,
+{
     pub fn new() -> Self {
         Self {
             slots: [(); N].map(|_| None),
@@ -253,9 +276,7 @@ where T: PartialOrd + 'static,
     }
 
     unsafe fn slot_mut(&self, index: usize) -> &mut Option<T> {
-        &mut *((&self.slots[index]
-                as *const Option<T>)
-               as *mut Option<T>)
+        &mut *((&self.slots[index] as *const Option<T>) as *mut Option<T>)
     }
 
     fn get_node(&self, index: usize) -> Node<T, K, N> {
@@ -278,9 +299,12 @@ where T: PartialOrd + 'static,
                 let index = N - stack_size;
                 let item = self.slots[index].take().unwrap();
 
-                if let Ok(_) = self.stack_size.compare_exchange(stack_size, stack_size - 1,
-                                                                Ordering::Relaxed,
-                                                                Ordering::Relaxed) {
+                if let Ok(_) = self.stack_size.compare_exchange(
+                    stack_size,
+                    stack_size - 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
                     break Some(item);
                 } else {
                     self.slots[index] = Some(item);
@@ -301,8 +325,7 @@ where T: PartialOrd + 'static,
     }
 
     fn sort(&mut self) {
-        while self.move_to_heap().is_ok() {
-        }
+        while self.move_to_heap().is_ok() {}
     }
 
     fn heap_insert(&mut self, item: T) -> Result<(), T> {
@@ -375,13 +398,16 @@ where T: PartialOrd + 'static,
             loop {
                 let available = self.available.load(Ordering::Relaxed);
 
-                if let Ok(_) = self.available.compare_exchange(available, available + 1,
-                                                               Ordering::Relaxed,
-                                                               Ordering::Relaxed) {
+                if let Ok(_) = self.available.compare_exchange(
+                    available,
+                    available + 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
                     break Some(item);
                 }
             }
-        } else  {
+        } else {
             None
         }
     }
@@ -390,11 +416,7 @@ where T: PartialOrd + 'static,
         self.sort();
 
         if self.heap_size > 0 {
-            Some(
-                PeekMut {
-                    queue: self,
-                }
-            )
+            Some(PeekMut { queue: self })
         } else {
             None
         }
@@ -534,7 +556,10 @@ mod tests {
 
         impl PartialEq for Item {
             fn eq(&self, other: &Self) -> bool {
-                self.v1 == other.v1 && self.v2 == other.v2 && self.v3 == other.v3 && self.v4 == other.v4
+                self.v1 == other.v1
+                    && self.v2 == other.v2
+                    && self.v3 == other.v3
+                    && self.v4 == other.v4
             }
         }
 
@@ -554,7 +579,7 @@ mod tests {
             let sender = queue.get_sender();
             let handler = thread::spawn(move || {
                 for j in 0..100 {
-                    let item = Item::new(i*100 + j);
+                    let item = Item::new(i * 100 + j);
                     sender.send(item).unwrap();
                 }
             });

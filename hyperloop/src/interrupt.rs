@@ -1,4 +1,7 @@
-use core::{pin::Pin, task::{Context, Poll, RawWaker, RawWakerVTable, Waker}};
+use core::{
+    pin::Pin,
+    task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
+};
 
 use core::future::Future;
 
@@ -6,11 +9,9 @@ unsafe fn clone(ptr: *const ()) -> RawWaker {
     RawWaker::new(ptr, &VTABLE)
 }
 
-unsafe fn wake(_ptr: *const ()) {
-}
+unsafe fn wake(_ptr: *const ()) {}
 
-unsafe fn drop(_ptr: *const ()) {
-}
+unsafe fn drop(_ptr: *const ()) {}
 
 const VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake, drop);
 
@@ -21,9 +22,7 @@ struct YieldFuture {
 
 impl YieldFuture {
     fn new() -> Self {
-        Self {
-            done: false
-        }
+        Self { done: false }
     }
 }
 
@@ -41,12 +40,16 @@ impl Future for YieldFuture {
 }
 
 pub struct Interrupt<F>
-where F: Future<Output = ()> + 'static {
+where
+    F: Future<Output = ()> + 'static,
+{
     future: F,
 }
 
 impl<F> Interrupt<F>
-where F: Future<Output = ()> + 'static {
+where
+    F: Future<Output = ()> + 'static,
+{
     pub fn new(future_fn: impl FnOnce() -> F) -> Self {
         Self {
             future: future_fn(),
@@ -54,10 +57,7 @@ where F: Future<Output = ()> + 'static {
     }
 
     fn get_waker(&self) -> Waker {
-        unsafe {
-            Waker::from_raw(RawWaker::new((self as *const Self).cast(),
-                                          &VTABLE))
-        }
+        unsafe { Waker::from_raw(RawWaker::new((self as *const Self).cast(), &VTABLE)) }
     }
 
     pub fn poll(&'static mut self) {
@@ -78,8 +78,8 @@ pub fn yield_now() -> impl Future<Output = ()> {
 mod tests {
     use core::task::Waker;
 
-    use std::{boxed::Box, sync::Arc};
     use crossbeam_queue::ArrayQueue;
+    use std::{boxed::Box, sync::Arc};
 
     use crate::common::tests::MockWaker;
 
@@ -116,14 +116,10 @@ mod tests {
             static mut INTERRUPT: Option<Interrupt<F>> = None;
 
             fn get_future() -> impl FnOnce() -> F {
-                || {
-                    async_handler()
-                }
+                || async_handler()
             }
 
-            let interrupt = unsafe {
-                INTERRUPT.get_or_insert(Interrupt::new(get_future()))
-            };
+            let interrupt = unsafe { INTERRUPT.get_or_insert(Interrupt::new(get_future())) };
 
             interrupt.poll();
         }
@@ -152,6 +148,5 @@ mod tests {
         assert_eq!(queue.pop(), Some(4));
         assert_eq!(queue.pop(), Some(5));
         assert_eq!(queue.pop(), None);
-
     }
 }

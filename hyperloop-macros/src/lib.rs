@@ -3,8 +3,15 @@
 
 use darling::FromMeta;
 use proc_macro::{self, TokenStream};
-use syn::{FnArg, Ident, Pat, Stmt, Token, parse::Parse, parse_quote, punctuated::{Pair, Punctuated}, spanned::Spanned, token::Comma};
 use quote::{format_ident, quote};
+use syn::{
+    parse::Parse,
+    parse_quote,
+    punctuated::{Pair, Punctuated},
+    spanned::Spanned,
+    token::Comma,
+    FnArg, Ident, Pat, Stmt, Token,
+};
 
 #[derive(Debug, FromMeta)]
 struct TaskArgs {
@@ -39,21 +46,21 @@ pub fn task(args: TokenStream, item: TokenStream) -> TokenStream {
     let name = task_fn.sig.ident.clone();
     let args = task_fn.sig.inputs.clone();
     let arg_values: Punctuated<Ident, Comma> = args
-            .pairs()
-            .filter_map(|pair| {
-                let (arg, punct) = pair.into_tuple();
+        .pairs()
+        .filter_map(|pair| {
+            let (arg, punct) = pair.into_tuple();
 
-                if let FnArg::Typed(pat_type) = arg {
-                    if let Pat::Ident(pat_ident) = *pat_type.pat.clone() {
-                        Some(Pair::new(pat_ident.ident, punct.copied()))
-                    } else {
-                        None
-                    }
+            if let FnArg::Typed(pat_type) = arg {
+                if let Pat::Ident(pat_ident) = *pat_type.pat.clone() {
+                    Some(Pair::new(pat_ident.ident, punct.copied()))
                 } else {
                     None
                 }
-            })
-            .collect();
+            } else {
+                None
+            }
+        })
+        .collect();
 
     let visibility = &task_fn.vis;
     task_fn.sig.ident = format_ident!("task");
@@ -128,7 +135,7 @@ pub fn executor_from_tasks(tokens: TokenStream) -> TokenStream {
                 );
                 stmt
             })
-            .collect()
+            .collect(),
     };
 
     let result = quote! {

@@ -10,7 +10,9 @@ pub mod tests {
 
     impl MockWaker {
         pub fn new() -> Self {
-            Self { woke: AtomicBool::new(false) }
+            Self {
+                woke: AtomicBool::new(false),
+            }
         }
     }
 
@@ -20,7 +22,7 @@ pub mod tests {
         }
     }
 
-    use log::{Record, Level, Metadata};
+    use log::{Level, Metadata, Record};
 
     struct SimpleLogger;
 
@@ -43,7 +45,6 @@ pub mod tests {
     }
 
     pub fn log_init() {
-        let _ = log::set_logger(&LOGGER)
-            .map(|()| log::set_max_level(LevelFilter::Info));
+        let _ = log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Info));
     }
 }
