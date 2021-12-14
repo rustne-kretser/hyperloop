@@ -3,7 +3,7 @@
 
 use darling::FromMeta;
 use proc_macro::{self, TokenStream};
-use syn::{FnArg, Ident, Pat, punctuated::{Pair, Punctuated}, spanned::Spanned, token::Comma};
+use syn::{FnArg, Ident, Pat, Stmt, Token, parse::Parse, parse_quote, punctuated::{Pair, Punctuated}, spanned::Spanned, token::Comma};
 use quote::{format_ident, quote};
 
 #[derive(Debug, FromMeta)]
@@ -84,5 +84,66 @@ pub fn task(args: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
     };
+    result.into()
+}
+
+struct Args {
+    args: Punctuated<Ident, Token![,]>,
+}
+
+impl Parse for Args {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        match Punctuated::<Ident, Token![,]>::parse_terminated(&input) {
+            Ok(args) => Ok(Self { args }),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+struct Statements {
+    data: Vec<Stmt>,
+}
+
+impl quote::ToTokens for Statements {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        for stmt in self.data.iter() {
+            stmt.to_tokens(tokens);
+        }
+    }
+}
+
+#[proc_macro]
+pub fn executor_from_tasks(tokens: TokenStream) -> TokenStream {
+    let args = syn::parse_macro_input!(tokens as Args).args;
+
+    let n_tasks = args.len();
+
+    let tasks = Statements {
+        data: args
+            .pairs()
+            .map(|pair| {
+                let task = pair.into_value();
+                let stmt: Stmt = parse_quote!(
+                    #task.add_to_executor(executor.get_sender()).unwrap();
+                );
+                stmt
+            })
+            .collect()
+    };
+
+    let result = quote! {
+        {
+            static mut EXECUTOR: Option<Executor<#n_tasks>> = None;
+
+            let executor = unsafe {
+                EXECUTOR.get_or_insert(Executor::new())
+            };
+
+            #tasks
+
+            executor
+        }
+    };
+
     result.into()
 }

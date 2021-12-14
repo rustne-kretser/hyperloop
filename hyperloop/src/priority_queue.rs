@@ -120,27 +120,77 @@ pub trait Sender: Clone {
     fn send(&self, item: Self::Item) -> Result<(), Self::Item>;
 }
 
-pub struct PrioritySender<'a, T, K, const N: usize>
-where T: PartialOrd,
-      K: Kind {
-    queue: &'a PriorityQueue<T, K, N>,
+pub struct PrioritySender<T>
+where T: 'static {
+    slots: &'static [Option<T>],
+    available: &'static AtomicUsize,
+    stack_size: &'static AtomicUsize,
 }
 
-impl<'a, T, K, const N: usize> Clone for PrioritySender<'a, T, K, N>
-where T: PartialOrd,
-      K: Kind {
+impl<T> Clone for PrioritySender<T> {
     fn clone(&self) -> Self {
-        Self { queue: self.queue.clone() }
+        Self {
+            slots: self.slots.clone(),
+            available: self.available.clone(),
+            stack_size: self.stack_size.clone() }
     }
 }
 
-impl<'a, T, K, const N: usize> Sender for PrioritySender<'a, T, K, N>
-where T: PartialOrd + 'static,
-      K: Kind + 'static {
+impl<T> PrioritySender<T> {
+    unsafe fn slot_mut(&self, index: usize) -> &mut Option<T> {
+        &mut *((&self.slots[index]
+                as *const Option<T>)
+               as *mut Option<T>)
+    }
+
+    fn stack_push(&self, item: T) -> Result<(), T> {
+        loop {
+            let stack_size = self.stack_size.load(Ordering::Relaxed);
+
+            if stack_size < self.slots.len() {
+                if let Ok(_) = self.stack_size.compare_exchange(stack_size, stack_size + 1,
+                                                                Ordering::Relaxed,
+                                                                Ordering::Relaxed) {
+                    let index = self.slots.len() - stack_size - 1;
+
+                    unsafe {
+                        let slot = self.slot_mut(index);
+                        *slot = Some(item);
+                    }
+
+                    break Ok(());
+                }
+            } else {
+                break Err(item);
+            }
+        }
+    }
+
+    pub fn push(&self, item: T) -> Result<(), T> {
+        loop {
+            let available = self.available.load(Ordering::Relaxed);
+
+            if available > 0 {
+                if let Ok(_) = self.available.compare_exchange(available, available - 1,
+                                                               Ordering::Relaxed,
+                                                               Ordering::Relaxed) {
+                    break;
+                }
+            } else {
+                return Err(item);
+            }
+        }
+
+        self.stack_push(item)
+    }
+
+}
+
+impl<T> Sender for PrioritySender<T> {
     type Item = T;
 
     fn send(&self, item: T) -> Result<(), T> {
-        self.queue.push(item)
+        self.push(item)
     }
 }
 
@@ -192,11 +242,13 @@ where T: PartialOrd + 'static,
         }
     }
 
-    pub fn get_sender(&self) -> impl Sender<Item = T> {
-        let queue = unsafe { &*(self as *const Self) };
+    pub fn get_sender(&self) -> PrioritySender<T> {
+        let queue: &'static Self = unsafe { &*(self as *const Self) };
 
         PrioritySender {
-            queue
+            slots: &queue.slots,
+            available: &queue.available,
+            stack_size: &queue.stack_size,
         }
     }
 
@@ -204,47 +256,6 @@ where T: PartialOrd + 'static,
         &mut *((&self.slots[index]
                 as *const Option<T>)
                as *mut Option<T>)
-    }
-
-    fn stack_push(&self, item: T) -> Result<(), T> {
-        loop {
-            let stack_size = self.stack_size.load(Ordering::Relaxed);
-
-            if stack_size < N - self.heap_size {
-                if let Ok(_) = self.stack_size.compare_exchange(stack_size, stack_size + 1,
-                                                                Ordering::Relaxed,
-                                                                Ordering::Relaxed) {
-                    let index = N - stack_size - 1;
-
-                    unsafe {
-                        let slot = self.slot_mut(index);
-                        *slot = Some(item);
-                    }
-
-                    break Ok(());
-                }
-            } else {
-                break Err(item);
-            }
-        }
-    }
-
-    pub fn push(&self, item: T) -> Result<(), T> {
-        loop {
-            let available = self.available.load(Ordering::Relaxed);
-
-            if available > 0 {
-                if let Ok(_) = self.available.compare_exchange(available, available - 1,
-                                                               Ordering::Relaxed,
-                                                               Ordering::Relaxed) {
-                    break;
-                }
-            } else {
-                return Err(item);
-            }
-        }
-
-        self.stack_push(item)
     }
 
     fn get_node(&self, index: usize) -> Node<T, K, N> {
@@ -433,12 +444,13 @@ mod tests {
     #[test]
     fn stack() {
         let mut heap: PriorityQueue<u32, Min, 10> = PriorityQueue::new();
+        let sender = heap.get_sender();
 
         for i in 0..10 {
-            heap.stack_push(i).unwrap();
+            sender.stack_push(i).unwrap();
         }
 
-        assert!(heap.stack_push(11).is_err());
+        assert!(sender.stack_push(11).is_err());
 
         for i in (0..10).rev() {
             assert_eq!(heap.pop_stack(), Some(i));
@@ -447,7 +459,7 @@ mod tests {
         assert!(heap.pop_stack().is_none());
 
         for i in 0..5 {
-            heap.stack_push(i).unwrap();
+            sender.stack_push(i).unwrap();
         }
 
         for i in (0..5).rev() {

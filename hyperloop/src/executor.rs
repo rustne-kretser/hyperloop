@@ -1,6 +1,6 @@
 use core::cmp::Ordering;
 
-use crate::priority_queue::{Max, PriorityQueue, Sender};
+use crate::priority_queue::{Max, PriorityQueue, PrioritySender};
 
 use crate::task::PollTask;
 
@@ -45,6 +45,8 @@ impl Ord for Ticket {
     }
 }
 
+pub(crate) type TaskSender = PrioritySender<Ticket>;
+
 pub struct Executor<const N: usize> {
     queue: PriorityQueue<Ticket, Max, N>,
 }
@@ -71,21 +73,22 @@ impl<const N: usize> Executor<N> {
         }
     }
 
-    pub fn get_sender(&self) -> impl Sender<Item = Ticket> {
+    pub fn get_sender(&self) -> TaskSender {
         self.queue.get_sender()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use hyperloop_macros::{executor_from_tasks, task};
+    use crossbeam_queue::ArrayQueue;
+    use std::sync::Arc;
+
     use crate::task::Task;
+    use super::*;
 
     #[test]
     fn test_executor() {
-        use super::*;
-        use crossbeam_queue::ArrayQueue;
-        use std::sync::Arc;
-
         let mut executor = Executor::<10>::new();
         let queue =  Arc::new(ArrayQueue::new(10));
 
@@ -114,6 +117,31 @@ mod tests {
         assert_eq!(queue.pop().unwrap(), 4);
         assert_eq!(queue.pop().unwrap(), 2);
         assert_eq!(queue.pop().unwrap(), 3);
+        assert_eq!(queue.pop().unwrap(), 1);
+    }
+
+    #[test]
+    fn macros() {
+        #[task(priority = 1)]
+        async fn test_task1(queue: Arc<ArrayQueue<u32>>) {
+            queue.push(1).unwrap();
+        }
+
+        #[task(priority = 2)]
+        async fn test_task2(queue: Arc<ArrayQueue<u32>>) {
+            queue.push(2).unwrap();
+        }
+
+        let queue = Arc::new(ArrayQueue::new(10));
+
+        let task1 = test_task1(queue.clone()).unwrap();
+        let task2 = test_task2(queue.clone()).unwrap();
+
+        let executor = executor_from_tasks!(task1, task2);
+
+        unsafe { executor.poll_tasks(); }
+
+        assert_eq!(queue.pop().unwrap(), 2);
         assert_eq!(queue.pop().unwrap(), 1);
     }
 }
