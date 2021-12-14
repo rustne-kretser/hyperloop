@@ -1,7 +1,7 @@
 use core::{lazy::OnceCell, pin::Pin, task::{Context, Poll, RawWaker, RawWakerVTable, Waker}};
 
+use atomig::{Atom, Atomic, Ordering};
 use futures::Future;
-use log::error;
 
 use crate::{executor::{Priority, TaskSender, Ticket}, priority_queue::Sender};
 
@@ -23,12 +23,20 @@ pub(crate) trait PollTask {
     unsafe fn poll(&self) -> Poll<()>;
 }
 
+#[repr(u8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Atom)]
+enum TaskState {
+    NotQueued,
+    Queued,
+}
+
 pub struct Task<F>
 where F: Future<Output = ()> + 'static {
     future: F,
     priority: Priority,
     sender: OnceCell<TaskSender>,
     vtable: RawWakerVTable,
+    state: Atomic<TaskState>,
 }
 
 impl<F> Task<F>
@@ -45,7 +53,23 @@ where F: Future<Output = ()> + 'static {
                                         wake::<F>,
                                         wake::<F>,
                                         drop),
+            state: Atomic::new(TaskState::NotQueued),
         }
+    }
+
+    fn update_state(&self, old: TaskState, new: TaskState) -> bool {
+        if let Ok(_) = self.state.compare_exchange(old, new,
+                                                   Ordering::Relaxed,
+                                                   Ordering::Relaxed) {
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(test)]
+    fn get_state(&self) -> TaskState {
+        self.state.load(Ordering::Relaxed)
     }
 
     unsafe fn as_static(&self) -> &'static Self {
@@ -79,18 +103,30 @@ where F: Future<Output = ()> + 'static {
         }
     }
 
-    fn schedule(&self) -> Result<(), ()> {
-        let ticket = Ticket::new(self as *const Self,
-                                 self.priority);
-
+    fn send_ticket(&self, ticket: Ticket) -> Result<(), ()> {
         if let Some(sender) = self.sender.get() {
-            if let Err(_err) = sender.send(ticket) {
-                error!("Failed to push to queue");
+            if let Ok(_) = sender.send(ticket) {
+                return Ok(());
             }
+        }
 
-            Ok(())
+        Err(())
+    }
+
+    fn schedule(&self) -> Result<(), ()> {
+        if self.update_state(TaskState::NotQueued, TaskState::Queued) {
+            let ticket = Ticket::new(self as *const Self,
+                                     self.priority);
+
+            match self.send_ticket(ticket) {
+                Ok(_) => Ok(()),
+                Err(_) => {
+                    assert!(self.update_state(TaskState::Queued, TaskState::NotQueued));
+                    Err(())
+                }
+            }
         } else {
-            Err(())
+            Ok(())
         }
     }
 }
@@ -102,6 +138,71 @@ where F: Future<Output = ()> + 'static {
         let mut cx = Context::from_waker(&waker);
         let future = Pin::new_unchecked(&mut self.as_mut().future);
 
-        future.poll(&mut cx)
+        assert!(self.update_state(TaskState::Queued, TaskState::NotQueued));
+        let result = future.poll(&mut cx);
+
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{interrupt::yield_now, priority_queue::{Max, PriorityQueue}};
+
+    use super::*;
+
+    #[test]
+    fn task() {
+        let mut queue: PriorityQueue<Ticket, Max, 1> = PriorityQueue::new();
+
+        let test_future = || {
+            || {
+                async fn future() {
+                    loop {
+                        yield_now().await
+                    }
+                }
+
+                future()
+            }
+        };
+
+        let task = Task::new(test_future(), 1);
+
+        task.set_sender(queue.get_sender()).unwrap();
+
+        assert_eq!(task.get_state(), TaskState::NotQueued);
+
+        task.schedule().unwrap();
+
+        assert_eq!(task.get_state(), TaskState::Queued);
+
+        assert!(queue.pop().is_some());
+        assert!(queue.pop().is_none());
+
+        task.schedule().unwrap();
+
+        assert!(queue.pop().is_none());
+
+        unsafe { assert_eq!(task.poll(), Poll::Pending); }
+
+        assert_eq!(task.get_state(), TaskState::NotQueued);
+
+        task.wake();
+        task.wake();
+        task.wake();
+
+        assert_eq!(task.get_state(), TaskState::Queued);
+
+        assert!(queue.pop().is_some());
+        assert!(queue.pop().is_none());
+
+        task.wake();
+        task.wake();
+        task.wake();
+
+        assert_eq!(task.get_state(), TaskState::Queued);
+
+        assert!(queue.pop().is_none());
     }
 }
