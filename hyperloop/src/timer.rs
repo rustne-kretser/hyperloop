@@ -13,7 +13,7 @@ use core::future::Future;
 use futures::{task::AtomicWaker, Stream, StreamExt};
 use log::error;
 
-use crate::priority_queue::{Min, PeekMut, PriorityQueue, PrioritySender, Sender};
+use crate::priority_queue::{Min, PeekMut, PriorityQueue, PrioritySender};
 
 type Tick = u64;
 

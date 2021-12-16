@@ -7,10 +7,7 @@ use core::{
 use atomig::{Atom, Atomic, Ordering};
 use futures::Future;
 
-use crate::{
-    executor::{Priority, TaskSender, Ticket},
-    priority_queue::Sender,
-};
+use crate::executor::{Priority, TaskSender, Ticket};
 
 unsafe fn clone<F: Future<Output = ()> + 'static>(ptr: *const ()) -> RawWaker {
     let task = &*(ptr as *const Task<F>);
