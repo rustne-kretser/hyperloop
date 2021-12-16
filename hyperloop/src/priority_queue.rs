@@ -187,12 +187,6 @@ impl AtomicStackPosition {
     }
 }
 
-pub trait Sender: Clone {
-    type Item;
-
-    fn send(&self, item: Self::Item) -> Result<(), Self::Item>;
-}
-
 pub struct PrioritySender<T>
 where
     T: 'static,
@@ -249,7 +243,7 @@ impl<T> PrioritySender<T> {
         Ok(())
     }
 
-    pub fn push(&self, item: T) -> Result<(), T> {
+    pub fn send(&self, item: T) -> Result<(), T> {
         loop {
             let available = self.available.load(Ordering::Relaxed);
 
@@ -268,14 +262,6 @@ impl<T> PrioritySender<T> {
         }
 
         self.stack_push(item)
-    }
-}
-
-impl<T> Sender for PrioritySender<T> {
-    type Item = T;
-
-    fn send(&self, item: T) -> Result<(), T> {
-        self.push(item)
     }
 }
 
