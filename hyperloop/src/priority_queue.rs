@@ -4,6 +4,8 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+use crossbeam_utils::Backoff;
+
 pub enum HeapKind {
     Max,
     Min,
@@ -122,6 +124,69 @@ where
     }
 }
 
+struct StackPosition {
+    value: usize,
+}
+
+impl StackPosition {
+    fn from_position(position: usize) -> Self {
+        Self {
+            value: position << 8,
+        }
+    }
+
+    fn new(value: usize) -> Self {
+        Self { value }
+    }
+
+    fn reserved(&self) -> Self {
+        assert!(self.value & 0xff != 0xff);
+
+        Self::new(self.value + 1 - (1 << 8))
+    }
+
+    fn pushed(&self) -> Self {
+        Self::new(self.value - 1)
+    }
+
+    fn popped(&self) -> Self {
+        Self::new(self.value + (1 << 8))
+    }
+
+    fn is_reserved(&self) -> bool {
+        (self.value & 0xff) > 0
+    }
+
+    fn pos(&self) -> usize {
+        self.value >> 8
+    }
+
+    fn value(&self) -> usize {
+        self.value
+    }
+}
+
+struct AtomicStackPosition {
+    atomic: AtomicUsize,
+}
+
+impl AtomicStackPosition {
+    fn new(position: usize) -> Self {
+        Self {
+            atomic: AtomicUsize::new(StackPosition::from_position(position).value()),
+        }
+    }
+
+    fn load(&self) -> StackPosition {
+        StackPosition::new(self.atomic.load(Ordering::Relaxed))
+    }
+
+    fn compare_exchange(&self, current: usize, new: usize) -> Result<usize, usize> {
+        self.atomic
+            .compare_exchange(current, new, Ordering::Relaxed, Ordering::Relaxed)
+    }
+}
+
 pub trait Sender: Clone {
     type Item;
 
@@ -134,7 +199,7 @@ where
 {
     slots: &'static [Option<T>],
     available: &'static AtomicUsize,
-    stack_size: &'static AtomicUsize,
+    stack_pos: &'static AtomicStackPosition,
 }
 
 impl<T> Clone for PrioritySender<T> {
@@ -142,7 +207,7 @@ impl<T> Clone for PrioritySender<T> {
         Self {
             slots: self.slots.clone(),
             available: self.available.clone(),
-            stack_size: self.stack_size.clone(),
+            stack_pos: self.stack_pos.clone(),
         }
     }
 }
@@ -154,28 +219,34 @@ impl<T> PrioritySender<T> {
 
     fn stack_push(&self, item: T) -> Result<(), T> {
         loop {
-            let stack_size = self.stack_size.load(Ordering::Relaxed);
+            let current = self.stack_pos.load();
 
-            if stack_size < self.slots.len() {
-                if let Ok(_) = self.stack_size.compare_exchange(
-                    stack_size,
-                    stack_size + 1,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    let index = self.slots.len() - stack_size - 1;
+            if current.pos() > 0 {
+                let new = current.reserved();
 
-                    unsafe {
-                        let slot = self.slot_mut(index);
-                        *slot = Some(item);
-                    }
-
-                    break Ok(());
+                if let Ok(_) = self
+                    .stack_pos
+                    .compare_exchange(current.value(), new.value())
+                {
+                    let slot = unsafe { self.slot_mut(new.pos()) };
+                    *slot = Some(item);
+                    break;
                 }
             } else {
-                break Err(item);
+                return Err(item);
             }
         }
+
+        loop {
+            let old = self.stack_pos.load();
+            let new = old.pushed();
+
+            if let Ok(_) = self.stack_pos.compare_exchange(old.value(), new.value()) {
+                break;
+            }
+        }
+
+        Ok(())
     }
 
     pub fn push(&self, item: T) -> Result<(), T> {
@@ -245,7 +316,7 @@ where
 {
     slots: [Option<T>; N],
     available: AtomicUsize,
-    stack_size: AtomicUsize,
+    stack_pos: AtomicStackPosition,
     heap_size: usize,
     _phantom: PhantomData<K>,
 }
@@ -259,7 +330,7 @@ where
         Self {
             slots: [(); N].map(|_| None),
             available: AtomicUsize::new(N),
-            stack_size: AtomicUsize::new(0),
+            stack_pos: AtomicStackPosition::new(N),
             heap_size: 0,
             _phantom: PhantomData,
         }
@@ -271,7 +342,7 @@ where
         PrioritySender {
             slots: &queue.slots,
             available: &queue.available,
-            stack_size: &queue.stack_size,
+            stack_pos: &queue.stack_pos,
         }
     }
 
@@ -291,32 +362,36 @@ where
         self.get_node(self.heap_size - 1)
     }
 
-    fn pop_stack(&mut self) -> Option<T> {
+    fn stack_pop(&mut self) -> Option<T> {
+        let backoff = Backoff::new();
+
         loop {
-            let stack_size = self.stack_size.load(Ordering::Relaxed);
+            let current = self.stack_pos.load();
 
-            if stack_size > 0 {
-                let index = N - stack_size;
-                let item = self.slots[index].take().unwrap();
-
-                if let Ok(_) = self.stack_size.compare_exchange(
-                    stack_size,
-                    stack_size - 1,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    break Some(item);
-                } else {
-                    self.slots[index] = Some(item);
-                }
-            } else {
+            if current.pos() == N {
                 break None;
+            }
+
+            if current.is_reserved() {
+                backoff.spin();
+            } else {
+                let new = current.popped();
+                let item = self.slots[current.pos()].take();
+
+                if let Ok(_) = self
+                    .stack_pos
+                    .compare_exchange(current.value(), new.value())
+                {
+                    break item;
+                } else {
+                    self.slots[current.pos()] = item;
+                }
             }
         }
     }
 
     fn move_to_heap(&mut self) -> Result<(), ()> {
-        if let Some(item) = self.pop_stack() {
+        if let Some(item) = self.stack_pop() {
             let _ = self.heap_insert(item);
             Ok(())
         } else {
@@ -475,20 +550,20 @@ mod tests {
         assert!(sender.stack_push(11).is_err());
 
         for i in (0..10).rev() {
-            assert_eq!(heap.pop_stack(), Some(i));
+            assert_eq!(heap.stack_pop(), Some(i));
         }
 
-        assert!(heap.pop_stack().is_none());
+        assert!(heap.stack_pop().is_none());
 
         for i in 0..5 {
             sender.stack_push(i).unwrap();
         }
 
         for i in (0..5).rev() {
-            assert_eq!(heap.pop_stack(), Some(i));
+            assert_eq!(heap.stack_pop(), Some(i));
         }
 
-        assert!(heap.pop_stack().is_none());
+        assert!(heap.stack_pop().is_none());
     }
 
     #[test]
@@ -535,63 +610,54 @@ mod tests {
 
     #[test]
     fn channel_thread() {
-        #[derive(Debug)]
-        struct Item {
-            v1: usize,
-            v2: usize,
-            v3: usize,
-            v4: usize,
-        }
-
-        impl Item {
-            fn new(i: usize) -> Self {
-                Self {
-                    v1: i,
-                    v2: i + 1,
-                    v3: i + 2,
-                    v4: i + 3,
-                }
-            }
-        }
-
-        impl PartialEq for Item {
-            fn eq(&self, other: &Self) -> bool {
-                self.v1 == other.v1
-                    && self.v2 == other.v2
-                    && self.v3 == other.v3
-                    && self.v4 == other.v4
-            }
-        }
-
-        impl PartialOrd for Item {
-            fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-                self.v1.partial_cmp(&other.v1)
-            }
-        }
-
         log_init();
 
         const N: usize = 1000;
-        let mut queue: PriorityQueue<Item, Min, N> = PriorityQueue::new();
+        let mut queue: PriorityQueue<u128, Min, N> = PriorityQueue::new();
         let mut handlers = Vec::new();
+        let mut items = Vec::new();
 
-        for i in 0..10 {
+        let n_threads = 10;
+        let n_items_per_thread = 1000;
+        let n_items = n_threads * n_items_per_thread;
+
+        for i in 0..n_threads {
             let sender = queue.get_sender();
             let handler = thread::spawn(move || {
-                for j in 0..100 {
-                    let item = Item::new(i * 100 + j);
-                    sender.send(item).unwrap();
+                for j in 0..n_items_per_thread {
+                    loop {
+                        let item = i * n_items_per_thread + j;
+
+                        if let Ok(_) = sender.send(item) {
+                            break;
+                        }
+
+                        std::thread::sleep(core::time::Duration::from_nanos(1));
+                    }
                 }
             });
             handlers.push(handler);
+        }
+
+        for _ in 0..n_items {
+            loop {
+                if let Some(item) = queue.pop() {
+                    items.push(item);
+                    break;
+                }
+
+                std::thread::sleep(core::time::Duration::from_nanos(1));
+            }
         }
 
         for handler in handlers {
             handler.join().unwrap();
         }
 
-        for i in 0..N {
-            assert_eq!(queue.pop(), Some(Item::new(i)));
+        items.sort();
+
+        for i in (0..n_items).rev() {
+            assert_eq!(items.pop(), Some(i));
         }
     }
 }
