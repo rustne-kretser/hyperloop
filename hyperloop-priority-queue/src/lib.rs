@@ -182,12 +182,12 @@ impl AtomicStackPosition {
     }
 
     fn load(&self) -> StackPosition {
-        StackPosition::new(self.atomic.load(Ordering::Relaxed))
+        StackPosition::new(self.atomic.load(Ordering::Acquire))
     }
 
     fn compare_exchange(&self, current: usize, new: usize) -> Result<usize, usize> {
         self.atomic
-            .compare_exchange(current, new, Ordering::Relaxed, Ordering::Relaxed)
+            .compare_exchange_weak(current, new, Ordering::Release, Ordering::Relaxed)
     }
 }
 
@@ -249,13 +249,13 @@ impl<T> PrioritySender<T> {
 
     pub fn send(&self, item: T) -> Result<(), T> {
         loop {
-            let available = self.available.load(Ordering::Relaxed);
+            let available = self.available.load(Ordering::Acquire);
 
             if available > 0 {
                 if let Ok(_) = self.available.compare_exchange(
                     available,
                     available - 1,
-                    Ordering::Relaxed,
+                    Ordering::Release,
                     Ordering::Relaxed,
                 ) {
                     break;
@@ -471,12 +471,12 @@ where
 
         if let Some(item) = self.heap_pop() {
             loop {
-                let available = self.available.load(Ordering::Relaxed);
+                let available = self.available.load(Ordering::Acquire);
 
                 if let Ok(_) = self.available.compare_exchange(
                     available,
                     available + 1,
-                    Ordering::Relaxed,
+                    Ordering::Release,
                     Ordering::Relaxed,
                 ) {
                     break Some(item);
