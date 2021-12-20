@@ -428,7 +428,7 @@ mod tests {
         let scheduler: &'static mut Scheduler<10> =
             Box::leak(Box::new(Scheduler::new(1000.Hz(), token.clone())));
         let timer = scheduler.get_timer();
-        let mut executor = Box::new(Executor::<10>::new());
+        let mut executor = Box::leak(Box::new(Executor::<10>::new())).get_ref();
         let queue = Arc::new(ArrayQueue::new(10));
 
         log_init();
@@ -469,9 +469,7 @@ mod tests {
         task1.add_to_executor(executor.get_sender()).unwrap();
         task2.add_to_executor(executor.get_sender()).unwrap();
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(1));
         assert_eq!(queue.pop(), None);
@@ -479,17 +477,13 @@ mod tests {
         unsafe {
             counter.tick();
         }
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(2));
         assert_eq!(queue.pop(), None);
 
         counter.wake();
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), None);
 
@@ -499,9 +493,7 @@ mod tests {
         unsafe {
             counter.tick();
         }
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(3));
         assert_eq!(queue.pop(), None);
@@ -512,9 +504,7 @@ mod tests {
         unsafe {
             counter.tick();
         }
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(4));
         assert_eq!(queue.pop(), None);
@@ -525,9 +515,7 @@ mod tests {
         unsafe {
             counter.tick();
         }
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(5));
         assert_eq!(queue.pop(), None);
@@ -536,9 +524,7 @@ mod tests {
             unsafe {
                 counter.tick();
             }
-            unsafe {
-                executor.poll_tasks();
-            }
+            executor.poll_tasks();
 
             assert_eq!(queue.pop(), None);
         }
@@ -546,9 +532,7 @@ mod tests {
         unsafe {
             counter.tick();
         }
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(6));
         assert_eq!(queue.pop(), None);
@@ -561,7 +545,7 @@ mod tests {
         let scheduler: &'static mut Scheduler<10> =
             Box::leak(Box::new(Scheduler::new(1000.Hz(), token.clone())));
         let timer = scheduler.get_timer();
-        let mut executor = Executor::<10>::new();
+        let mut executor = Box::leak(Box::new(Executor::<10>::new())).get_ref();
         let queue = Arc::new(ArrayQueue::new(10));
 
         log_init();
@@ -601,9 +585,7 @@ mod tests {
         task1.add_to_executor(executor.get_sender()).unwrap();
         task2.add_to_executor(executor.get_sender()).unwrap();
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(1));
         assert_eq!(queue.pop(), None);
@@ -616,9 +598,7 @@ mod tests {
 
         counter.wake();
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(2));
         assert_eq!(queue.pop(), None);
@@ -629,9 +609,7 @@ mod tests {
             }
             counter.wake();
 
-            unsafe {
-                executor.poll_tasks();
-            }
+            executor.poll_tasks();
 
             assert_eq!(queue.pop(), None);
         }
@@ -641,9 +619,7 @@ mod tests {
         }
         counter.wake();
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(3));
         assert_eq!(queue.pop(), None);

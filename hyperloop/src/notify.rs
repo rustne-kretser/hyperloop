@@ -72,7 +72,7 @@ mod tests {
     fn notify() {
         let notification = Box::leak(Box::new(Notification::new()));
 
-        let mut executor = Executor::<10>::new();
+        let mut executor = Box::leak(Box::new(Executor::<10>::new())).get_ref();
         let queue = Arc::new(ArrayQueue::new(10));
 
         let wait = |receiver, queue| {
@@ -92,39 +92,28 @@ mod tests {
 
         task1.add_to_executor(executor.get_sender()).unwrap();
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(1));
         assert_eq!(queue.pop(), None);
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), None);
 
         notification.notify();
-
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(2));
         assert_eq!(queue.pop(), None);
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), None);
 
         notification.notify();
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(3));
         assert_eq!(queue.pop(), None);
