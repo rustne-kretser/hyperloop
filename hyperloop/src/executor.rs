@@ -70,7 +70,7 @@ impl<const N: usize> Executor<N> {
         }
     }
 
-    fn get_sender(&self) -> TaskSender {
+    unsafe fn get_sender(&self) -> TaskSender {
         self.queue.get_sender()
     }
 
@@ -96,7 +96,7 @@ impl<const N: usize> ExecutorRef<N> {
     }
 
     pub fn get_sender(&self) -> TaskSender {
-        self.executor.get_sender()
+        unsafe { self.executor.get_sender() }
     }
 }
 

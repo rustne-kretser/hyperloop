@@ -302,7 +302,7 @@ impl<const N: usize> Scheduler<N> {
         }
     }
 
-    pub fn get_timer(&self) -> Timer {
+    pub unsafe fn get_timer(&self) -> Timer {
         Timer::new(self.rate, self.counter.clone(), self.queue.get_sender())
     }
 
@@ -379,7 +379,7 @@ mod tests {
         let token = counter.get_token();
         let scheduler: &'static mut Scheduler<10> =
             Box::leak(Box::new(Scheduler::new(1000.Hz(), token.clone())));
-        let sender = scheduler.queue.get_sender();
+        let sender = unsafe { scheduler.queue.get_sender() };
         let mockwaker = Arc::new(MockWaker::new());
         let waker: Waker = mockwaker.clone().into();
         let mut cx = Context::from_waker(&waker);
@@ -427,7 +427,7 @@ mod tests {
         let token = counter.get_token();
         let scheduler: &'static mut Scheduler<10> =
             Box::leak(Box::new(Scheduler::new(1000.Hz(), token.clone())));
-        let timer = scheduler.get_timer();
+        let timer = unsafe { scheduler.get_timer() };
         let mut executor = Box::leak(Box::new(Executor::<10>::new())).get_ref();
         let queue = Arc::new(ArrayQueue::new(10));
 
@@ -544,7 +544,7 @@ mod tests {
         let token = counter.get_token();
         let scheduler: &'static mut Scheduler<10> =
             Box::leak(Box::new(Scheduler::new(1000.Hz(), token.clone())));
-        let timer = scheduler.get_timer();
+        let timer = unsafe { scheduler.get_timer() };
         let mut executor = Box::leak(Box::new(Executor::<10>::new())).get_ref();
         let queue = Arc::new(ArrayQueue::new(10));
 
