@@ -1,8 +1,12 @@
-use core::{
-    marker::PhantomData,
-    ops::Deref,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+#![no_std]
+
+use core::{marker::PhantomData, ops::Deref, sync::atomic::Ordering};
+
+#[cfg(not(loom))]
+use core::sync::atomic::AtomicUsize;
+
+#[cfg(loom)]
+use loom::sync::atomic::AtomicUsize;
 
 use crossbeam_utils::Backoff;
 
@@ -178,12 +182,12 @@ impl AtomicStackPosition {
     }
 
     fn load(&self) -> StackPosition {
-        StackPosition::new(self.atomic.load(Ordering::Relaxed))
+        StackPosition::new(self.atomic.load(Ordering::Acquire))
     }
 
     fn compare_exchange(&self, current: usize, new: usize) -> Result<usize, usize> {
         self.atomic
-            .compare_exchange(current, new, Ordering::Relaxed, Ordering::Relaxed)
+            .compare_exchange_weak(current, new, Ordering::Release, Ordering::Relaxed)
     }
 }
 
@@ -245,13 +249,13 @@ impl<T> PrioritySender<T> {
 
     pub fn send(&self, item: T) -> Result<(), T> {
         loop {
-            let available = self.available.load(Ordering::Relaxed);
+            let available = self.available.load(Ordering::Acquire);
 
             if available > 0 {
                 if let Ok(_) = self.available.compare_exchange(
                     available,
                     available - 1,
-                    Ordering::Relaxed,
+                    Ordering::Release,
                     Ordering::Relaxed,
                 ) {
                     break;
@@ -348,18 +352,16 @@ where
         self.get_node(self.heap_size - 1)
     }
 
-    fn stack_pop(&mut self) -> Option<T> {
-        let backoff = Backoff::new();
-
+    fn try_stack_pop(&mut self) -> Result<Option<T>, ()> {
         loop {
             let current = self.stack_pos.load();
 
             if current.pos() == N {
-                break None;
+                break Ok(None);
             }
 
             if current.is_reserved() {
-                backoff.spin();
+                break Err(());
             } else {
                 let new = current.popped();
                 let item = self.slots[current.pos()].take();
@@ -368,11 +370,23 @@ where
                     .stack_pos
                     .compare_exchange(current.value(), new.value())
                 {
-                    break item;
+                    break Ok(item);
                 } else {
                     self.slots[current.pos()] = item;
                 }
             }
+        }
+    }
+
+    fn stack_pop(&mut self) -> Option<T> {
+        let backoff = Backoff::new();
+
+        loop {
+            if let Ok(item) = self.try_stack_pop() {
+                break item;
+            }
+
+            backoff.spin();
         }
     }
 
@@ -457,12 +471,12 @@ where
 
         if let Some(item) = self.heap_pop() {
             loop {
-                let available = self.available.load(Ordering::Relaxed);
+                let available = self.available.load(Ordering::Acquire);
 
                 if let Ok(_) = self.available.compare_exchange(
                     available,
                     available + 1,
-                    Ordering::Relaxed,
+                    Ordering::Release,
                     Ordering::Relaxed,
                 ) {
                     break Some(item);
@@ -484,13 +498,12 @@ where
     }
 }
 
+#[cfg(not(loom))]
 #[cfg(test)]
 mod tests {
     use std::thread;
 
     use std::vec::Vec;
-
-    use crate::common::tests::log_init;
 
     use super::*;
 
@@ -596,8 +609,6 @@ mod tests {
 
     #[test]
     fn channel_thread() {
-        log_init();
-
         const N: usize = 1000;
         let mut queue: PriorityQueue<u128, Min, N> = PriorityQueue::new();
         let mut handlers = Vec::new();
@@ -645,5 +656,60 @@ mod tests {
         for i in (0..n_items).rev() {
             assert_eq!(items.pop(), Some(i));
         }
+    }
+}
+
+#[cfg(test)]
+#[macro_use]
+extern crate std;
+
+#[cfg(test)]
+#[cfg(loom)]
+mod tests_loom {
+    use std::boxed::Box;
+    use std::vec::Vec;
+
+    use loom::thread;
+
+    use super::*;
+
+    #[test]
+    fn stack() {
+        loom::model(|| {
+            let queue: &'static mut PriorityQueue<u128, Min, 2> =
+                Box::leak(Box::new(PriorityQueue::new()));
+
+            let n_threads = 2;
+
+            let handles: Vec<_> = (0..n_threads)
+                .map(|i| {
+                    let sender = queue.get_sender();
+                    thread::spawn(move || {
+                        sender.stack_push(i).unwrap();
+                    })
+                })
+                .collect();
+
+            let consumer = thread::spawn(move || {
+                let item = queue.try_stack_pop();
+                (item, queue)
+            });
+
+            for handle in handles {
+                handle.join().unwrap();
+            }
+            let (item, queue) = consumer.join().unwrap();
+
+            let first = if let Ok(Some(value)) = item {
+                value
+            } else {
+                queue.try_stack_pop().unwrap().unwrap()
+            };
+
+            let next = if first == 0 { 1 } else { 0 };
+
+            assert_eq!(queue.try_stack_pop(), Ok(Some(next)));
+            assert_eq!(queue.try_stack_pop(), Ok(None));
+        });
     }
 }

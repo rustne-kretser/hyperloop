@@ -1,0 +1,16 @@
+[package]
+name = "hyperloop-priority-queue"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+atomig = {version = "0.3.2", features = ["derive"]}
+crossbeam-utils = "0.8.5"
+
+[target.'cfg(loom)'.dependencies]
+loom =  "0.5.4"
+
+[dev-dependencies.crossbeam-queue]
+version = "0.3"
