@@ -1,3 +1,5 @@
+#![no_std]
+
 use core::{
     marker::PhantomData,
     ops::Deref,
@@ -485,12 +487,14 @@ where
 }
 
 #[cfg(test)]
+#[macro_use]
+extern crate std;
+
+#[cfg(test)]
 mod tests {
     use std::thread;
 
     use std::vec::Vec;
-
-    use crate::common::tests::log_init;
 
     use super::*;
 
@@ -596,8 +600,6 @@ mod tests {
 
     #[test]
     fn channel_thread() {
-        log_init();
-
         const N: usize = 1000;
         let mut queue: PriorityQueue<u128, Min, N> = PriorityQueue::new();
         let mut handlers = Vec::new();

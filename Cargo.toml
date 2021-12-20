@@ -3,4 +3,5 @@
 members = [
     "hyperloop",
     "hyperloop-macros",
+    "hyperloop-priority-queue",
 ]
