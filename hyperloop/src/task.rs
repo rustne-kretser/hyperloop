@@ -150,6 +150,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::boxed::Box;
+
     use crate::{
         interrupt::yield_now,
         priority_queue::{Max, PriorityQueue},
@@ -159,7 +161,8 @@ mod tests {
 
     #[test]
     fn task() {
-        let mut queue: PriorityQueue<Ticket, Max, 1> = PriorityQueue::new();
+        let queue: &'static mut PriorityQueue<Ticket, Max, 1> =
+            Box::leak(Box::new(PriorityQueue::new()));
 
         let test_future = || {
             || {
@@ -175,7 +178,7 @@ mod tests {
 
         let task = Task::new(test_future(), 1);
 
-        task.set_sender(queue.get_sender()).unwrap();
+        task.set_sender(unsafe { queue.get_sender() }).unwrap();
 
         assert_eq!(task.get_state(), TaskState::NotQueued);
 

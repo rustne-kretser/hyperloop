@@ -326,8 +326,14 @@ where
         }
     }
 
-    pub fn get_sender(&self) -> PrioritySender<T> {
-        let queue: &'static Self = unsafe { &*(self as *const Self) };
+    /// Return sender to queue
+    ///
+    /// # Safety
+    ///
+    /// Sender contains a static reference to the queue, so the queue
+    /// should be static for the sender to be safe.
+    pub unsafe fn get_sender(&self) -> PrioritySender<T> {
+        let queue: &'static Self = &*(self as *const Self);
 
         PrioritySender {
             slots: &queue.slots,
@@ -540,7 +546,7 @@ mod tests {
     #[test]
     fn stack() {
         let mut heap: PriorityQueue<u32, Min, 10> = PriorityQueue::new();
-        let sender = heap.get_sender();
+        let sender = unsafe { heap.get_sender() };
 
         for i in 0..10 {
             sender.stack_push(i).unwrap();
@@ -568,7 +574,7 @@ mod tests {
     #[test]
     fn channel() {
         let mut queue: PriorityQueue<u32, Min, 10> = PriorityQueue::new();
-        let sender = queue.get_sender();
+        let sender = unsafe { queue.get_sender() };
 
         for i in 0..10 {
             sender.send(i).unwrap();
@@ -619,7 +625,7 @@ mod tests {
         let n_items = n_threads * n_items_per_thread;
 
         for i in 0..n_threads {
-            let sender = queue.get_sender();
+            let sender = unsafe { queue.get_sender() };
             let handler = thread::spawn(move || {
                 for j in 0..n_items_per_thread {
                     loop {
@@ -683,7 +689,7 @@ mod tests_loom {
 
             let handles: Vec<_> = (0..n_threads)
                 .map(|i| {
-                    let sender = queue.get_sender();
+                    let sender = unsafe { queue.get_sender() };
                     thread::spawn(move || {
                         sender.stack_push(i).unwrap();
                     })

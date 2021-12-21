@@ -143,7 +143,7 @@ pub fn executor_from_tasks(tokens: TokenStream) -> TokenStream {
             static mut EXECUTOR: Option<Executor<#n_tasks>> = None;
 
             let executor = unsafe {
-                EXECUTOR.get_or_insert(Executor::new())
+                EXECUTOR.get_or_insert(Executor::new()).get_ref()
             };
 
             #tasks

@@ -64,21 +64,46 @@ impl<const N: usize> Executor<N> {
     /// pointers to the tasks stored in the executor. The pointers can
     /// be dereferenced at any time and will be dangling if the
     /// exeutor is moved or dropped.
-    pub unsafe fn poll_tasks(&mut self) {
+    unsafe fn poll_tasks(&mut self) {
         while let Some(ticket) = self.queue.pop() {
             let _ = ticket.get_task().poll();
         }
     }
 
-    pub fn get_sender(&self) -> TaskSender {
+    unsafe fn get_sender(&self) -> TaskSender {
         self.queue.get_sender()
+    }
+
+    pub fn get_ref(&'static mut self) -> ExecutorRef<N> {
+        ExecutorRef::new(self)
+    }
+}
+
+/// Wrapper around Executor to allow safe polling
+pub struct ExecutorRef<const N: usize> {
+    executor: &'static mut Executor<N>,
+}
+
+impl<const N: usize> ExecutorRef<N> {
+    fn new(executor: &'static mut Executor<N>) -> Self {
+        Self { executor }
+    }
+
+    pub fn poll_tasks(&mut self) {
+        unsafe {
+            self.executor.poll_tasks();
+        }
+    }
+
+    pub fn get_sender(&self) -> TaskSender {
+        unsafe { self.executor.get_sender() }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crossbeam_queue::ArrayQueue;
-    use hyperloop_macros::{executor_from_tasks, task};
+    use std::boxed::Box;
     use std::sync::Arc;
 
     use super::*;
@@ -86,7 +111,7 @@ mod tests {
 
     #[test]
     fn test_executor() {
-        let mut executor = Executor::<10>::new();
+        let mut executor = Box::leak(Box::new(Executor::<10>::new())).get_ref();
         let queue = Arc::new(ArrayQueue::new(10));
 
         let test_future = |queue, value| {
@@ -109,40 +134,11 @@ mod tests {
         task3.add_to_executor(executor.get_sender()).unwrap();
         task4.add_to_executor(executor.get_sender()).unwrap();
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop().unwrap(), 4);
         assert_eq!(queue.pop().unwrap(), 2);
         assert_eq!(queue.pop().unwrap(), 3);
-        assert_eq!(queue.pop().unwrap(), 1);
-    }
-
-    #[test]
-    fn macros() {
-        #[task(priority = 1)]
-        async fn test_task1(queue: Arc<ArrayQueue<u32>>) {
-            queue.push(1).unwrap();
-        }
-
-        #[task(priority = 2)]
-        async fn test_task2(queue: Arc<ArrayQueue<u32>>) {
-            queue.push(2).unwrap();
-        }
-
-        let queue = Arc::new(ArrayQueue::new(10));
-
-        let task1 = test_task1(queue.clone()).unwrap();
-        let task2 = test_task2(queue.clone()).unwrap();
-
-        let executor = executor_from_tasks!(task1, task2);
-
-        unsafe {
-            executor.poll_tasks();
-        }
-
-        assert_eq!(queue.pop().unwrap(), 2);
         assert_eq!(queue.pop().unwrap(), 1);
     }
 }
