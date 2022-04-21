@@ -302,7 +302,7 @@ impl<const N: usize> Scheduler<N> {
         }
     }
 
-    pub fn get_timer(&self) -> Timer {
+    unsafe fn get_timer(&self) -> Timer {
         Timer::new(self.rate, self.counter.clone(), self.queue.get_sender())
     }
 
@@ -316,7 +316,7 @@ impl<const N: usize> Scheduler<N> {
         None
     }
 
-    pub async fn task(&mut self) {
+    async fn task(&mut self) {
         let mut timer = TimerFuture::new(self.counter.clone());
 
         loop {
@@ -326,6 +326,28 @@ impl<const N: usize> Scheduler<N> {
                 timer.next().await.unwrap()
             }
         }
+    }
+
+    pub fn get_handle(&'static mut self) -> SchedulerHandle<N> {
+        SchedulerHandle::new(self)
+    }
+}
+
+pub struct SchedulerHandle<const N: usize> {
+    scheduler: &'static mut Scheduler<N>,
+}
+
+impl<const N: usize> SchedulerHandle<N> {
+    pub fn new(scheduler: &'static mut Scheduler<N>) -> Self {
+        Self { scheduler }
+    }
+
+    pub fn get_timer(&self) -> Timer {
+        unsafe { self.scheduler.get_timer() }
+    }
+
+    pub fn into_task(self) -> impl Future<Output = ()> {
+        self.scheduler.task()
     }
 }
 
@@ -377,9 +399,11 @@ mod tests {
     fn delay() {
         let counter = Box::leak(Box::new(TickCounter::new()));
         let token = counter.get_token();
-        let scheduler: &'static mut Scheduler<10> =
-            Box::leak(Box::new(Scheduler::new(1000.Hz(), token.clone())));
-        let sender = scheduler.queue.get_sender();
+        let scheduler: SchedulerHandle<10> =
+            Box::leak(Box::new(Scheduler::new(1000.Hz(), token.clone()))).get_handle();
+
+        let queue = &mut scheduler.scheduler.queue;
+        let sender = unsafe { queue.get_sender() };
         let mockwaker = Arc::new(MockWaker::new());
         let waker: Waker = mockwaker.clone().into();
         let mut cx = Context::from_waker(&waker);
@@ -406,17 +430,17 @@ mod tests {
 
         assert_eq!(Pin::new(&mut future).poll(&mut cx), Poll::Pending);
 
-        if let Some(ticket) = scheduler.queue.pop() {
+        if let Some(ticket) = queue.pop() {
             assert_eq!(ticket.expires, 1);
             ticket.waker.wake();
             assert_eq!(mockwaker.woke.load(Ordering::Relaxed), true)
         }
 
-        if let Some(ticket) = scheduler.queue.pop() {
+        if let Some(ticket) = queue.pop() {
             assert_eq!(ticket.expires, 15);
         }
 
-        if let Some(ticket) = scheduler.queue.pop() {
+        if let Some(ticket) = queue.pop() {
             assert_eq!(ticket.expires, 20);
         }
     }
@@ -425,11 +449,9 @@ mod tests {
     fn timer() {
         let counter = Box::leak(Box::new(TickCounter::new()));
         let token = counter.get_token();
-        let scheduler: &'static mut Scheduler<10> =
-            Box::leak(Box::new(Scheduler::new(1000.Hz(), token.clone())));
+        let scheduler: SchedulerHandle<10> =
+            Box::leak(Box::new(Scheduler::new(1000.Hz(), token.clone()))).get_handle();
         let timer = scheduler.get_timer();
-        let mut executor = Box::new(Executor::<10>::new());
-        let queue = Arc::new(ArrayQueue::new(10));
 
         log_init();
 
@@ -463,15 +485,18 @@ mod tests {
             }
         };
 
-        let task1 = Task::new(move || scheduler.task(), 1);
-        let task2 = Task::new(test_future(queue.clone(), timer.clone()), 1);
+        let queue = Arc::new(ArrayQueue::new(10));
 
-        task1.add_to_executor(executor.get_sender()).unwrap();
-        task2.add_to_executor(executor.get_sender()).unwrap();
+        let task1 = Box::leak(Box::new(Task::new(move || scheduler.into_task(), 1))).get_handle();
+        let task2 = Box::leak(Box::new(Task::new(
+            test_future(queue.clone(), timer.clone()),
+            1,
+        )))
+        .get_handle();
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        let mut executor = Box::leak(Box::new(Executor::new([task1, task2]))).get_handle();
+
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(1));
         assert_eq!(queue.pop(), None);
@@ -479,17 +504,13 @@ mod tests {
         unsafe {
             counter.tick();
         }
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(2));
         assert_eq!(queue.pop(), None);
 
         counter.wake();
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), None);
 
@@ -499,9 +520,7 @@ mod tests {
         unsafe {
             counter.tick();
         }
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(3));
         assert_eq!(queue.pop(), None);
@@ -512,9 +531,7 @@ mod tests {
         unsafe {
             counter.tick();
         }
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(4));
         assert_eq!(queue.pop(), None);
@@ -525,9 +542,7 @@ mod tests {
         unsafe {
             counter.tick();
         }
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(5));
         assert_eq!(queue.pop(), None);
@@ -536,9 +551,7 @@ mod tests {
             unsafe {
                 counter.tick();
             }
-            unsafe {
-                executor.poll_tasks();
-            }
+            executor.poll_tasks();
 
             assert_eq!(queue.pop(), None);
         }
@@ -546,9 +559,7 @@ mod tests {
         unsafe {
             counter.tick();
         }
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(6));
         assert_eq!(queue.pop(), None);
@@ -558,11 +569,9 @@ mod tests {
     fn timeout() {
         let counter = Box::leak(Box::new(TickCounter::new()));
         let token = counter.get_token();
-        let scheduler: &'static mut Scheduler<10> =
-            Box::leak(Box::new(Scheduler::new(1000.Hz(), token.clone())));
+        let scheduler: SchedulerHandle<10> =
+            Box::leak(Box::new(Scheduler::new(1000.Hz(), token.clone()))).get_handle();
         let timer = scheduler.get_timer();
-        let mut executor = Executor::<10>::new();
-        let queue = Arc::new(ArrayQueue::new(10));
 
         log_init();
 
@@ -595,15 +604,15 @@ mod tests {
             }
         };
 
-        let task1 = Task::new(move || scheduler.task(), 1);
-        let task2 = Task::new(waiting_future(queue.clone(), timer), 1);
+        let queue = Arc::new(ArrayQueue::new(10));
 
-        task1.add_to_executor(executor.get_sender()).unwrap();
-        task2.add_to_executor(executor.get_sender()).unwrap();
+        let task1 = Box::leak(Box::new(Task::new(move || scheduler.into_task(), 1))).get_handle();
+        let task2 =
+            Box::leak(Box::new(Task::new(waiting_future(queue.clone(), timer), 1))).get_handle();
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        let mut executor = Box::leak(Box::new(Executor::new([task1, task2]))).get_handle();
+
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(1));
         assert_eq!(queue.pop(), None);
@@ -616,9 +625,7 @@ mod tests {
 
         counter.wake();
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(2));
         assert_eq!(queue.pop(), None);
@@ -629,10 +636,7 @@ mod tests {
             }
             counter.wake();
 
-            unsafe {
-                executor.poll_tasks();
-            }
-
+            executor.poll_tasks();
             assert_eq!(queue.pop(), None);
         }
 
@@ -641,9 +645,7 @@ mod tests {
         }
         counter.wake();
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(3));
         assert_eq!(queue.pop(), None);

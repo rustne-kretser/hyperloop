@@ -2,7 +2,7 @@
 name = "hyperloop"
 version = "0.1.0"
 authors = ["Eivind Alexander Bergem <eivind.bergem@gmail.com>"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 futures = {version = "0.3.15", default-features = false}

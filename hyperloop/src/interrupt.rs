@@ -29,9 +29,11 @@ impl YieldFuture {
 impl Future for YieldFuture {
     type Output = ();
 
-    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if !self.done {
             self.done = true;
+            cx.waker().wake_by_ref();
+
             Poll::Pending
         } else {
             Poll::Ready(())
