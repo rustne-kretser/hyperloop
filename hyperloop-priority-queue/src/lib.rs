@@ -1,6 +1,6 @@
 #![no_std]
 
-use core::{marker::PhantomData, ops::Deref, sync::atomic::Ordering};
+use core::{cell::UnsafeCell, marker::PhantomData, mem, ops::Deref, sync::atomic::Ordering};
 
 #[cfg(not(loom))]
 use core::sync::atomic::AtomicUsize;
@@ -102,7 +102,7 @@ where
     }
 
     fn item(&self) -> &T {
-        self.heap.slots[self.pos].as_ref().unwrap()
+        unsafe { self.heap.slot_mut(self.pos).as_ref().unwrap() }
     }
 
     unsafe fn slot_mut(&self) -> &mut Option<T> {
@@ -113,10 +113,7 @@ where
         let slot = unsafe { self.slot_mut() };
         let other_slot = unsafe { other.slot_mut() };
 
-        let item = slot.take();
-        *slot = other_slot.take();
-        *other_slot = item;
-
+        mem::swap(slot, other_slot);
         other
     }
 
@@ -187,7 +184,7 @@ impl AtomicStackPosition {
 
     fn compare_exchange(&self, current: usize, new: usize) -> Result<usize, usize> {
         self.atomic
-            .compare_exchange_weak(current, new, Ordering::Release, Ordering::Relaxed)
+            .compare_exchange_weak(current, new, Ordering::AcqRel, Ordering::Relaxed)
     }
 }
 
@@ -195,7 +192,7 @@ pub struct PrioritySender<T>
 where
     T: 'static,
 {
-    slots: &'static [Option<T>],
+    slots: &'static [UnsafeCell<Option<T>>],
     available: &'static AtomicUsize,
     stack_pos: &'static AtomicStackPosition,
 }
@@ -210,9 +207,12 @@ impl<T> Clone for PrioritySender<T> {
     }
 }
 
+unsafe impl<T> Send for PrioritySender<T> {}
+unsafe impl<T> Sync for PrioritySender<T> {}
+
 impl<T> PrioritySender<T> {
     unsafe fn slot_mut(&self, index: usize) -> &mut Option<T> {
-        &mut *((&self.slots[index] as *const Option<T>) as *mut Option<T>)
+        &mut *self.slots[index].get()
     }
 
     fn stack_push(&self, item: T) -> Result<(), T> {
@@ -289,13 +289,13 @@ where
 
 impl<'a, T, K, const N: usize> Deref for PeekMut<'a, T, K, N>
 where
-    T: PartialOrd,
-    K: Kind,
+    T: PartialOrd + 'static,
+    K: Kind + 'static,
 {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        self.queue.slots[0].as_ref().unwrap()
+        unsafe { self.queue.slot_mut(0).as_ref().unwrap() }
     }
 }
 
@@ -304,7 +304,7 @@ where
     T: PartialOrd,
     K: Kind,
 {
-    slots: [Option<T>; N],
+    slots: [UnsafeCell<Option<T>>; N],
     available: AtomicUsize,
     stack_pos: AtomicStackPosition,
     heap_size: usize,
@@ -318,7 +318,7 @@ where
 {
     pub fn new() -> Self {
         Self {
-            slots: [(); N].map(|_| None),
+            slots: [(); N].map(|_| UnsafeCell::new(None)),
             available: AtomicUsize::new(N),
             stack_pos: AtomicStackPosition::new(N),
             heap_size: 0,
@@ -337,7 +337,7 @@ where
     }
 
     unsafe fn slot_mut(&self, index: usize) -> &mut Option<T> {
-        &mut *((&self.slots[index] as *const Option<T>) as *mut Option<T>)
+        &mut *self.slots[index].get()
     }
 
     fn get_node(&self, index: usize) -> Node<T, K, N> {
@@ -364,7 +364,7 @@ where
                 break Err(());
             } else {
                 let new = current.popped();
-                let item = self.slots[current.pos()].take();
+                let item = unsafe { self.slot_mut(current.pos()).take() };
 
                 if let Ok(_) = self
                     .stack_pos
@@ -372,7 +372,9 @@ where
                 {
                     break Ok(item);
                 } else {
-                    self.slots[current.pos()] = item;
+                    unsafe {
+                        *self.slot_mut(current.pos()) = item;
+                    }
                 }
             }
         }
@@ -407,7 +409,9 @@ where
         let index = self.heap_size;
 
         if index < N {
-            self.slots[index] = Some(item);
+            unsafe {
+                *self.slot_mut(index) = Some(item);
+            }
 
             self.heap_size += 1;
 
@@ -431,7 +435,8 @@ where
     }
 
     fn take_root(&mut self) -> Option<T> {
-        if let Some(item) = self.slots[0].take() {
+        if self.heap_size > 1 {
+            let item = unsafe { self.slot_mut(0).take() }.unwrap();
             {
                 let root = self.get_root();
                 let last = self.get_last();
@@ -440,6 +445,9 @@ where
             self.heap_size -= 1;
 
             Some(item)
+        } else if self.heap_size == 1 {
+            self.heap_size -= 1;
+            Some(unsafe { self.slot_mut(0).take() }.unwrap())
         } else {
             None
         }
@@ -501,9 +509,7 @@ where
 #[cfg(not(loom))]
 #[cfg(test)]
 mod tests {
-    use std::thread;
-
-    use std::vec::Vec;
+    use std::{thread, vec::Vec};
 
     use super::*;
 
@@ -608,6 +614,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn channel_thread() {
         const N: usize = 1000;
         let mut queue: PriorityQueue<u128, Min, N> = PriorityQueue::new();
