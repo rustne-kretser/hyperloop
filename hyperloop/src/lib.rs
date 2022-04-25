@@ -1,8 +1,6 @@
 #![no_std]
-#![feature(const_fn_trait_bound)]
 #![feature(type_alias_impl_trait)]
 #![feature(once_cell)]
-#![feature(option_result_unwrap_unchecked)]
 
 mod common;
 
