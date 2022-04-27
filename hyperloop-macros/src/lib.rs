@@ -5,10 +5,11 @@ use darling::FromMeta;
 use proc_macro::{self, TokenStream};
 use quote::{format_ident, quote};
 use syn::{
+    parse::Parse,
     punctuated::{Pair, Punctuated},
     spanned::Spanned,
     token::Comma,
-    FnArg, Ident, Pat,
+    Expr, FnArg, Ident, Pat, Stmt, Token,
 };
 
 #[derive(Debug, FromMeta)]
@@ -89,5 +90,51 @@ pub fn task(args: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
     };
+    result.into()
+}
+
+struct Args {
+    args: Punctuated<Expr, Token![,]>,
+}
+
+impl Parse for Args {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        match Punctuated::<Expr, Token![,]>::parse_terminated(&input) {
+            Ok(args) => Ok(Self { args }),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+struct Statements {
+    data: Vec<Stmt>,
+}
+
+impl quote::ToTokens for Statements {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        for stmt in self.data.iter() {
+            stmt.to_tokens(tokens);
+        }
+    }
+}
+
+#[proc_macro]
+pub fn static_executor(tokens: TokenStream) -> TokenStream {
+    let args = syn::parse_macro_input!(tokens as Args).args;
+
+    let n_tasks = args.len();
+
+    let result = quote! {
+        {
+            static mut EXECUTOR: Option<Executor<#n_tasks>> = None;
+
+            let executor = unsafe {
+                EXECUTOR.get_or_insert(Executor::new([#args]))
+            };
+
+            executor.get_handle()
+        }
+    };
+
     result.into()
 }

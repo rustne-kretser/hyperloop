@@ -216,7 +216,7 @@ impl<const N: usize> ExecutorHandle<N> {
 #[cfg(test)]
 mod tests {
     use crossbeam_queue::ArrayQueue;
-    use hyperloop_macros::task;
+    use hyperloop_macros::{static_executor, task};
     use std::boxed::Box;
     use std::sync::Arc;
 
@@ -243,12 +243,12 @@ mod tests {
         let task3 = Box::leak(Box::new(Task::new(test_future(queue.clone(), 3), 2)));
         let task4 = Box::leak(Box::new(Task::new(test_future(queue.clone(), 4), 4)));
 
-        let mut executor = ExecutorHandle::new(Box::leak(Box::new(Executor::new([
+        let mut executor = static_executor!(
             task1.get_handle(),
             task2.get_handle(),
             task3.get_handle(),
             task4.get_handle(),
-        ]))));
+        );
 
         executor.poll_tasks();
 
@@ -278,7 +278,7 @@ mod tests {
 
         let task = Box::leak(Box::new(Task::new(test_future(queue.clone(), notify), 1)));
 
-        let mut executor = Box::leak(Box::new(Executor::new([task.get_handle()]))).get_handle();
+        let mut executor = static_executor!(task.get_handle());
 
         executor.poll_tasks();
 
