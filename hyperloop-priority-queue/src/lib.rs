@@ -192,9 +192,9 @@ pub struct PrioritySender<T>
 where
     T: 'static,
 {
-    slots: &'static [UnsafeCell<Option<T>>],
-    available: &'static AtomicUsize,
-    stack_pos: &'static AtomicStackPosition,
+    slots: *const [UnsafeCell<Option<T>>],
+    available: *const AtomicUsize,
+    stack_pos: *const AtomicStackPosition,
 }
 
 impl<T> Clone for PrioritySender<T> {
@@ -212,20 +212,19 @@ unsafe impl<T> Sync for PrioritySender<T> {}
 
 impl<T> PrioritySender<T> {
     unsafe fn slot_mut(&self, index: usize) -> &mut Option<T> {
-        &mut *self.slots[index].get()
+        &mut *(*self.slots)[index].get()
     }
 
     fn stack_push(&self, item: T) -> Result<(), T> {
+        let stack_pos = unsafe { &*self.stack_pos };
+
         loop {
-            let current = self.stack_pos.load();
+            let current = stack_pos.load();
 
             if current.pos() > 0 {
                 let new = current.reserved();
 
-                if let Ok(_) = self
-                    .stack_pos
-                    .compare_exchange(current.value(), new.value())
-                {
+                if let Ok(_) = stack_pos.compare_exchange(current.value(), new.value()) {
                     let slot = unsafe { self.slot_mut(new.pos()) };
                     *slot = Some(item);
                     break;
@@ -236,10 +235,10 @@ impl<T> PrioritySender<T> {
         }
 
         loop {
-            let old = self.stack_pos.load();
+            let old = stack_pos.load();
             let new = old.pushed();
 
-            if let Ok(_) = self.stack_pos.compare_exchange(old.value(), new.value()) {
+            if let Ok(_) = stack_pos.compare_exchange(old.value(), new.value()) {
                 break;
             }
         }
@@ -248,13 +247,15 @@ impl<T> PrioritySender<T> {
     }
 
     pub fn send(&self, item: T) -> Result<(), T> {
-        loop {
-            let available = self.available.load(Ordering::Acquire);
+        let available = unsafe { &*self.available };
 
-            if available > 0 {
-                if let Ok(_) = self.available.compare_exchange(
-                    available,
-                    available - 1,
+        loop {
+            let n_available = available.load(Ordering::Acquire);
+
+            if n_available > 0 {
+                if let Ok(_) = available.compare_exchange(
+                    n_available,
+                    n_available - 1,
                     Ordering::Release,
                     Ordering::Relaxed,
                 ) {
