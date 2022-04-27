@@ -1,10 +1,13 @@
+use core::cell::UnsafeCell;
 use core::cmp::Ordering;
+use core::mem;
 use core::sync::atomic::AtomicBool;
 use core::task::{Poll, RawWaker, RawWakerVTable, Waker};
 
 use crate::priority_queue::{Max, PriorityQueue, PrioritySender};
 
 use crate::task::TaskHandle;
+use crate::timer::Scheduler;
 
 pub(crate) type Priority = u8;
 type TaskId = u16;
@@ -124,7 +127,7 @@ impl ExecutorTask {
 }
 
 pub struct Executor<const N: usize> {
-    tasks: [ExecutorTask; N],
+    tasks: [UnsafeCell<ExecutorTask>; N],
     queue: PriorityQueue<Ticket, Max, N>,
 }
 
@@ -133,7 +136,7 @@ impl<const N: usize> Executor<N> {
         let mut i = 0;
         let tasks = tasks.map(|task| {
             let priority = task.priority;
-            let task = ExecutorTask::new(task, i, priority, None);
+            let task = UnsafeCell::new(ExecutorTask::new(task, i, priority, None));
             i += 1;
             task
         });
@@ -147,7 +150,7 @@ impl<const N: usize> Executor<N> {
     unsafe fn get_task(&mut self, task_id: TaskId) -> &mut ExecutorTask {
         let index = task_id as usize;
 
-        let task = &mut self.tasks[index];
+        let task = &mut *self.tasks[index].get();
         task.clear_pending_wake_flag();
 
         task
@@ -186,23 +189,27 @@ impl<const N: usize> Executor<N> {
     }
 
     pub fn get_handle(&'static mut self) -> ExecutorHandle<N> {
-        ExecutorHandle::new(self)
+        ExecutorHandle::new(unsafe { &mut *mem::transmute::<_, *mut Self>(self) })
     }
 }
 
 pub struct ExecutorHandle<const N: usize> {
-    executor: &'static mut Executor<N>,
+    executor: *mut Executor<N>,
 }
 
 impl<const N: usize> ExecutorHandle<N> {
-    pub fn new(executor: &'static mut Executor<N>) -> Self {
-        unsafe { executor.init() };
+    pub fn new(executor: *mut Executor<N>) -> Self {
+        unsafe { (*executor).init() };
         Self { executor }
     }
 
     /// Poll all tasks in the queue
     pub fn poll_tasks(&mut self) {
-        unsafe { self.executor.poll_tasks() }
+        unsafe { (*self.executor).poll_tasks() }
+    }
+
+    pub fn with_scheduler(self, _scheduler: &Scheduler<N>) -> Self {
+        self
     }
 }
 
@@ -271,8 +278,7 @@ mod tests {
 
         let task = Box::leak(Box::new(Task::new(test_future(queue.clone(), notify), 1)));
 
-        let mut executor =
-            ExecutorHandle::new(Box::leak(Box::new(Executor::new([task.get_handle()]))));
+        let mut executor = Box::leak(Box::new(Executor::new([task.get_handle()]))).get_handle();
 
         executor.poll_tasks();
 
@@ -289,7 +295,7 @@ mod tests {
         executor.poll_tasks();
         assert!(queue.pop().is_none());
 
-        let waker = unsafe { executor.executor.get_task(0).get_waker() };
+        let waker = unsafe { (*executor.executor).get_task(0).get_waker() };
 
         waker.wake();
 
