@@ -1,4 +1,5 @@
 use core::{
+    cell::UnsafeCell,
     pin::Pin,
     task::{Context, Poll, Waker},
 };
@@ -10,66 +11,58 @@ use embedded_time::{
 };
 
 use core::future::Future;
-use futures::{task::AtomicWaker, Stream, StreamExt};
 use log::error;
 
 use crate::priority_queue::{Min, PeekMut, PriorityQueue, PrioritySender};
 
 type Tick = u64;
 
-pub struct TickCounter {
-    count: Tick,
-    waker: AtomicWaker,
+pub struct Scheduler<const N: usize> {
+    rate: Hertz,
+    counter: UnsafeCell<Tick>,
+    queue: PriorityQueue<Ticket, Min, N>,
 }
 
-impl TickCounter {
-    pub const fn new() -> Self {
+impl<const N: usize> Scheduler<N> {
+    pub fn new(rate: Hertz) -> Self {
         Self {
-            count: 0,
-            waker: AtomicWaker::new(),
+            rate,
+            counter: UnsafeCell::new(0),
+            queue: PriorityQueue::new(),
         }
     }
 
-    /// Increment tick count
-    ///
-    /// # Safety
-    ///
-    /// Updating the tick value is not atomic on 32-bit systems, so it
-    /// would be possible to get an invalid reading if reading during
-    /// a write. For this reason, this function should only be called
-    /// from a high priority interrupt handler.
     pub unsafe fn increment(&mut self) {
-        self.count += 1;
+        *self.counter.get() += 1;
     }
 
-    pub fn wake(&self) {
-        self.waker.wake();
+    fn next_waker(&mut self) -> Option<Waker> {
+        if let Some(ticket) = self.queue.peek_mut().as_mut() {
+            if unsafe { *self.counter.get() } > ticket.expires {
+                return Some(PeekMut::pop(ticket).waker);
+            }
+        }
+
+        None
+    }
+
+    fn wake_tasks(&mut self) {
+        while let Some(waker) = self.next_waker() {
+            waker.wake();
+        }
     }
 
     pub unsafe fn tick(&mut self) {
         self.increment();
-        self.wake();
+        self.wake_tasks();
     }
 
-    pub fn get_token(&self) -> TickCounterToken {
-        TickCounterToken {
-            counter: unsafe { &*(self as *const Self) },
-        }
-    }
-}
+    pub fn get_timer(&self) -> Timer {
+        let counter = self.counter.get() as *const _;
+        let sender = unsafe { self.queue.get_sender() };
+        let timer = Timer::new(self.rate, counter, sender);
 
-#[derive(Clone)]
-pub struct TickCounterToken {
-    counter: &'static TickCounter,
-}
-
-impl TickCounterToken {
-    pub fn register_waker(&self, waker: &Waker) {
-        self.counter.waker.register(waker);
-    }
-
-    pub fn get_count(&self) -> Tick {
-        self.counter.count
+        timer
     }
 }
 
@@ -107,13 +100,13 @@ impl Ord for Ticket {
 
 struct DelayFuture {
     sender: PrioritySender<Ticket>,
-    counter: TickCounterToken,
+    counter: *const Tick,
     expires: Tick,
     started: bool,
 }
 
 impl DelayFuture {
-    fn new(sender: PrioritySender<Ticket>, counter: TickCounterToken, expires: Tick) -> Self {
+    fn new(sender: PrioritySender<Ticket>, counter: *const Tick, expires: Tick) -> Self {
         Self {
             sender,
             counter,
@@ -141,7 +134,7 @@ impl Future for DelayFuture {
             // expiration. This ensures that we wait for no less than
             // the specified duration, and possibly one tick longer
             // than desired.
-            if self.counter.get_count() > self.expires {
+            if unsafe { *self.counter } > self.expires {
                 Poll::Ready(())
             } else {
                 Poll::Pending
@@ -162,12 +155,7 @@ impl<F> TimeoutFuture<F>
 where
     F: Future,
 {
-    fn new(
-        future: F,
-        sender: PrioritySender<Ticket>,
-        counter: TickCounterToken,
-        expires: Tick,
-    ) -> Self {
+    fn new(future: F, sender: PrioritySender<Ticket>, counter: *const Tick, expires: Tick) -> Self {
         Self {
             future,
             delay: DelayFuture::new(sender, counter, expires),
@@ -205,12 +193,12 @@ where
 #[derive(Clone)]
 pub struct Timer {
     rate: Hertz,
-    counter: TickCounterToken,
+    counter: *const Tick,
     sender: PrioritySender<Ticket>,
 }
 
 impl Timer {
-    pub fn new(rate: Hertz, counter: TickCounterToken, sender: PrioritySender<Ticket>) -> Self {
+    pub fn new(rate: Hertz, counter: *const Tick, sender: PrioritySender<Ticket>) -> Self {
         Self {
             rate,
             counter,
@@ -223,7 +211,7 @@ impl Timer {
     }
 
     fn get_count(&self) -> Tick {
-        self.counter.get_count()
+        unsafe { *self.counter }
     }
 
     fn delay_to_ticks<D: Duration + Into<Milliseconds>>(&self, duration: D) -> Tick {
@@ -240,7 +228,7 @@ impl Timer {
     pub fn delay(&self, duration: Milliseconds) -> impl Future {
         DelayFuture::new(
             self.sender.clone(),
-            self.counter.clone(),
+            self.counter,
             self.delay_to_ticks(duration),
         )
     }
@@ -249,83 +237,9 @@ impl Timer {
         TimeoutFuture::new(
             future,
             self.sender.clone(),
-            self.counter.clone(),
+            self.counter,
             self.delay_to_ticks(duration),
         )
-    }
-}
-
-struct TimerFuture {
-    counter: TickCounterToken,
-    expires: Option<Tick>,
-}
-
-impl TimerFuture {
-    fn new(counter: TickCounterToken) -> Self {
-        Self {
-            counter,
-            expires: None,
-        }
-    }
-}
-
-impl Stream for TimerFuture {
-    type Item = ();
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if let Some(expires) = self.expires {
-            if self.counter.get_count() >= expires {
-                self.expires = None;
-                return Poll::Ready(Some(()));
-            }
-        } else {
-            self.expires = Some(self.counter.get_count() + 1_u64);
-        }
-
-        self.counter.register_waker(cx.waker());
-        Poll::Pending
-    }
-}
-
-pub struct Scheduler<const N: usize> {
-    rate: Hertz,
-    counter: TickCounterToken,
-    queue: PriorityQueue<Ticket, Min, N>,
-}
-
-impl<const N: usize> Scheduler<N> {
-    pub fn new(rate: Hertz, counter: TickCounterToken) -> Self {
-        Self {
-            rate,
-            counter,
-            queue: PriorityQueue::new(),
-        }
-    }
-
-    pub fn get_timer(&self) -> Timer {
-        Timer::new(self.rate, self.counter.clone(), self.queue.get_sender())
-    }
-
-    fn next_waker(&mut self) -> Option<Waker> {
-        if let Some(ticket) = self.queue.peek_mut().as_mut() {
-            if self.counter.get_count() > ticket.expires {
-                return Some(PeekMut::pop(ticket).waker);
-            }
-        }
-
-        None
-    }
-
-    pub async fn task(&mut self) {
-        let mut timer = TimerFuture::new(self.counter.clone());
-
-        loop {
-            if let Some(waker) = self.next_waker() {
-                waker.wake();
-            } else {
-                timer.next().await.unwrap()
-            }
-        }
     }
 }
 
@@ -347,44 +261,32 @@ mod tests {
 
     #[test]
     fn state() {
-        let counter = Box::leak(Box::new(TickCounter::new()));
-        let token = counter.get_token();
+        let scheduler = Box::leak(Box::new(Scheduler::<0>::new(1000.Hz())));
+        let timer = scheduler.get_timer();
 
-        assert_eq!(token.get_count(), 0);
+        assert_eq!(unsafe { *timer.counter }, 0);
 
-        unsafe { counter.increment() };
-        assert_eq!(token.get_count(), 1);
-
-        let mockwaker = Arc::new(MockWaker::new());
-        let waker: Waker = mockwaker.clone().into();
-
-        token.register_waker(&waker);
-        counter.wake();
-
-        assert_eq!(mockwaker.woke.load(Ordering::Relaxed), true);
-
-        mockwaker.woke.store(false, Ordering::Relaxed);
-        token.register_waker(&waker);
+        unsafe { scheduler.tick() };
+        assert_eq!(unsafe { *timer.counter }, 1);
 
         unsafe {
-            counter.tick();
+            scheduler.tick();
         }
-        assert_eq!(token.get_count(), 2);
-        assert_eq!(mockwaker.woke.load(Ordering::Relaxed), true);
+
+        assert_eq!(unsafe { *timer.counter }, 2);
     }
 
     #[test]
     fn delay() {
-        let counter = Box::leak(Box::new(TickCounter::new()));
-        let token = counter.get_token();
-        let scheduler: &'static mut Scheduler<10> =
-            Box::leak(Box::new(Scheduler::new(1000.Hz(), token.clone())));
-        let sender = scheduler.queue.get_sender();
+        let scheduler = Box::leak(Box::new(Scheduler::<10>::new(1000.Hz())));
+        let timer = scheduler.get_timer();
+        let counter = timer.counter;
+
         let mockwaker = Arc::new(MockWaker::new());
         let waker: Waker = mockwaker.clone().into();
         let mut cx = Context::from_waker(&waker);
 
-        let mut future = DelayFuture::new(sender.clone(), token.clone(), 1);
+        let mut future = DelayFuture::new(timer.sender.clone(), counter, 1);
 
         assert_eq!(Pin::new(&mut future).poll(&mut cx), Poll::Pending);
         assert_eq!(Pin::new(&mut future).poll(&mut cx), Poll::Pending);
@@ -392,17 +294,17 @@ mod tests {
         assert_eq!(future.started, true);
 
         unsafe {
-            counter.tick();
-            counter.tick();
+            scheduler.increment();
+            scheduler.increment();
         }
 
         assert_eq!(Pin::new(&mut future).poll(&mut cx), Poll::Ready(()));
 
-        let mut future = DelayFuture::new(sender.clone(), token.clone(), 20);
+        let mut future = DelayFuture::new(timer.sender.clone(), counter, 20);
 
         assert_eq!(Pin::new(&mut future).poll(&mut cx), Poll::Pending);
 
-        let mut future = DelayFuture::new(sender.clone(), token.clone(), 15);
+        let mut future = DelayFuture::new(timer.sender.clone(), counter, 15);
 
         assert_eq!(Pin::new(&mut future).poll(&mut cx), Poll::Pending);
 
@@ -423,13 +325,8 @@ mod tests {
 
     #[test]
     fn timer() {
-        let counter = Box::leak(Box::new(TickCounter::new()));
-        let token = counter.get_token();
-        let scheduler: &'static mut Scheduler<10> =
-            Box::leak(Box::new(Scheduler::new(1000.Hz(), token.clone())));
+        let scheduler = Box::leak(Box::new(Scheduler::new(1000.Hz())));
         let timer = scheduler.get_timer();
-        let mut executor = Box::new(Executor::<10>::new());
-        let queue = Arc::new(ArrayQueue::new(10));
 
         log_init();
 
@@ -463,92 +360,82 @@ mod tests {
             }
         };
 
-        let task1 = Task::new(move || scheduler.task(), 1);
-        let task2 = Task::new(test_future(queue.clone(), timer.clone()), 1);
+        let queue = Arc::new(ArrayQueue::new(10));
 
-        task1.add_to_executor(executor.get_sender()).unwrap();
-        task2.add_to_executor(executor.get_sender()).unwrap();
+        let task = Box::leak(Box::new(Task::new(
+            test_future(queue.clone(), timer.clone()),
+            1,
+        )))
+        .get_handle();
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        let mut executor = Box::leak(Box::new(Executor::new([task])))
+            .get_handle()
+            .with_scheduler(scheduler);
+
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(1));
         assert_eq!(queue.pop(), None);
 
         unsafe {
-            counter.tick();
+            scheduler.tick();
         }
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(2));
         assert_eq!(queue.pop(), None);
 
-        counter.wake();
-        unsafe {
-            executor.poll_tasks();
-        }
+        scheduler.wake_tasks();
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), None);
 
         unsafe {
-            counter.tick();
+            scheduler.tick();
         }
         unsafe {
-            counter.tick();
+            scheduler.tick();
         }
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(3));
         assert_eq!(queue.pop(), None);
 
         unsafe {
-            counter.tick();
+            scheduler.tick();
         }
         unsafe {
-            counter.tick();
+            scheduler.tick();
         }
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(4));
         assert_eq!(queue.pop(), None);
 
         unsafe {
-            counter.tick();
+            scheduler.tick();
         }
         unsafe {
-            counter.tick();
+            scheduler.tick();
         }
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(5));
         assert_eq!(queue.pop(), None);
 
         for _ in 0..10 {
             unsafe {
-                counter.tick();
+                scheduler.tick();
             }
-            unsafe {
-                executor.poll_tasks();
-            }
+            executor.poll_tasks();
 
             assert_eq!(queue.pop(), None);
         }
 
         unsafe {
-            counter.tick();
+            scheduler.tick();
         }
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(6));
         assert_eq!(queue.pop(), None);
@@ -556,13 +443,8 @@ mod tests {
 
     #[test]
     fn timeout() {
-        let counter = Box::leak(Box::new(TickCounter::new()));
-        let token = counter.get_token();
-        let scheduler: &'static mut Scheduler<10> =
-            Box::leak(Box::new(Scheduler::new(1000.Hz(), token.clone())));
+        let scheduler = Box::leak(Box::new(Scheduler::<2>::new(1000.Hz())));
         let timer = scheduler.get_timer();
-        let mut executor = Executor::<10>::new();
-        let queue = Arc::new(ArrayQueue::new(10));
 
         log_init();
 
@@ -595,55 +477,47 @@ mod tests {
             }
         };
 
-        let task1 = Task::new(move || scheduler.task(), 1);
-        let task2 = Task::new(waiting_future(queue.clone(), timer), 1);
+        let queue = Arc::new(ArrayQueue::new(10));
 
-        task1.add_to_executor(executor.get_sender()).unwrap();
-        task2.add_to_executor(executor.get_sender()).unwrap();
+        let task =
+            Box::leak(Box::new(Task::new(waiting_future(queue.clone(), timer), 1))).get_handle();
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        let mut executor = Box::leak(Box::new(Executor::new([task]))).get_handle();
+
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(1));
         assert_eq!(queue.pop(), None);
 
         for _ in 0..101 {
             unsafe {
-                counter.increment();
+                scheduler.increment();
             }
         }
 
-        counter.wake();
+        scheduler.wake_tasks();
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(2));
         assert_eq!(queue.pop(), None);
 
         for _ in 0..1000 {
             unsafe {
-                counter.increment();
+                scheduler.increment();
             }
-            counter.wake();
+            scheduler.wake_tasks();
 
-            unsafe {
-                executor.poll_tasks();
-            }
-
+            executor.poll_tasks();
             assert_eq!(queue.pop(), None);
         }
 
         unsafe {
-            counter.increment();
+            scheduler.increment();
         }
-        counter.wake();
+        scheduler.wake_tasks();
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(3));
         assert_eq!(queue.pop(), None);

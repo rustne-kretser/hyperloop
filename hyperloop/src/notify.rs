@@ -64,7 +64,10 @@ mod tests {
     use std::boxed::Box;
     use std::sync::Arc;
 
-    use crate::{executor::Executor, task::Task};
+    use crate::{
+        executor::{Executor, ExecutorHandle},
+        task::Task,
+    };
 
     use super::*;
 
@@ -72,7 +75,6 @@ mod tests {
     fn notify() {
         let notification = Box::leak(Box::new(Notification::new()));
 
-        let mut executor = Executor::<10>::new();
         let queue = Arc::new(ArrayQueue::new(10));
 
         let wait = |receiver, queue| {
@@ -88,43 +90,34 @@ mod tests {
             }
         };
 
-        let task1 = Task::new(wait(notification, queue.clone()), 1);
+        let task = Box::leak(Box::new(Task::new(wait(notification, queue.clone()), 1)));
 
-        task1.add_to_executor(executor.get_sender()).unwrap();
+        let mut executor =
+            ExecutorHandle::new(Box::leak(Box::new(Executor::new([task.get_handle()]))));
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(1));
         assert_eq!(queue.pop(), None);
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), None);
 
         notification.notify();
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(2));
         assert_eq!(queue.pop(), None);
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), None);
 
         notification.notify();
 
-        unsafe {
-            executor.poll_tasks();
-        }
+        executor.poll_tasks();
 
         assert_eq!(queue.pop(), Some(3));
         assert_eq!(queue.pop(), None);
