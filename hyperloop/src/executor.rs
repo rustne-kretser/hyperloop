@@ -208,7 +208,7 @@ impl<const N: usize> ExecutorHandle<N> {
         unsafe { (*self.executor).poll_tasks() }
     }
 
-    pub fn with_scheduler(self, _scheduler: &Scheduler<N>) -> Self {
+    pub fn with_scheduler(self, _scheduler: &Scheduler) -> Self {
         self
     }
 }
